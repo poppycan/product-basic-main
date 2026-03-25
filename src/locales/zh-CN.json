@@ -1,0 +1,54 @@
+{
+  "topNav": {
+    "theme": "主题",
+    "mode": "风格",
+    "light": "浅色",
+    "dark": "深色",
+    "colors": "主题颜色",
+    "language": "语言",
+    "quickLinks": "快捷入口",
+    "color": "颜色",
+    "toggleSidebar": "导航栏",
+    "brandTagline": "快速搭建企业内部工具与组件库",
+    "languageZh": "中文",
+    "languageEn": "英文"
+  },
+  "home": {
+    "title": "欢迎使用云智分析平台基础骨架",
+    "subtitle": "这里保留了布局与导航结构，帮助你快速扩展业务模块。",
+    "cards": {
+      "layout": {
+        "title": "布局框架",
+        "description": "主布局、顶栏、侧栏均已组件化，可快速接入业务页面。"
+      },
+      "theme": {
+        "title": "主题与颜色",
+        "description": "支持浅/深色模式与多主题色切换，默认浅色绿色。"
+      },
+      "i18n": {
+        "title": "多语言",
+        "description": "内置中英双语，可根据需要扩展更多语言。"
+      }
+    }
+  },
+  "demo": {
+    "title": "演示页面",
+    "description": "通过 Element Plus 组件展示基础表单、图表与列表，作为内部组件库示例。",
+    "table": {
+      "name": "名称",
+      "status": "状态",
+      "owner": "负责人",
+      "updated": "更新日期"
+    },
+    "status": {
+      "online": "在线",
+      "offline": "离线",
+      "draft": "草稿"
+    },
+    "actions": {
+      "approve": "通过",
+      "reject": "驳回",
+      "view": "查看"
+    }
+  }
+}

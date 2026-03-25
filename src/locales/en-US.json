@@ -1,0 +1,54 @@
+{
+  "topNav": {
+    "theme": "Theme",
+    "mode": "Mode",
+    "light": "Light",
+    "dark": "Dark",
+    "colors": "Primary Colors",
+    "language": "Language",
+    "quickLinks": "Quick Links",
+    "color": "Color",
+    "toggleSidebar": "Sidebar",
+    "brandTagline": "Bootstrap internal tools and component libraries fast.",
+    "languageZh": "Chinese",
+    "languageEn": "English"
+  },
+  "home": {
+    "title": "Welcome to the Cloud Insight Starter",
+    "subtitle": "The layout and navigation shell are ready so you can focus on business logic.",
+    "cards": {
+      "layout": {
+        "title": "Layout System",
+        "description": "Main layout, top navigation, and side navigation are componentized for reuse."
+      },
+      "theme": {
+        "title": "Theme & Colors",
+        "description": "Light and dark modes with multiple primary colors. Green is applied by default."
+      },
+      "i18n": {
+        "title": "Internationalisation",
+        "description": "Chinese and English are built in; extend the dictionary as needed."
+      }
+    }
+  },
+  "demo": {
+    "title": "Demo Page",
+    "description": "Showcase Element Plus cards, table, and actions to seed your internal component library.",
+    "table": {
+      "name": "Name",
+      "status": "Status",
+      "owner": "Owner",
+      "updated": "Updated"
+    },
+    "status": {
+      "online": "Online",
+      "offline": "Offline",
+      "draft": "Draft"
+    },
+    "actions": {
+      "approve": "Approve",
+      "reject": "Reject",
+      "view": "View"
+    }
+  }
+}
