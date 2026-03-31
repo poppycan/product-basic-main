@@ -8,7 +8,6 @@ import {
   ElDropdownMenu,
   ElIcon,
   ElInput,
-  ElLoading,
   ElOption,
   ElPagination,
   ElSelect,
@@ -34,7 +33,6 @@ import {
   WarningFilled,
   MoreFilled,
   SetUp,
-  Grid,
   Close,
   Setting,
   Plus,
@@ -42,14 +40,17 @@ import {
   InfoFilled,
   Link,
   Edit,
-  MagicStick,
 } from '@element-plus/icons-vue';
 import PageContent from '@/components/PageContent.vue';
 import {
   mockDeviceTree,
   mockTagStats,
   mockBusinessTagList,
+  mockPolicies,
   searchPolicies,
+  computeNormalFieldStats,
+  policyRowMatchesFieldLabel,
+  tokenizeQuery,
 } from '@/api/mock/security-policy';
 import type { BusinessTagItem } from '@/api/mock/security-policy';
 import type {
@@ -190,8 +191,6 @@ const handleDeviceDelete = () => {
 };
 
 // ---------- 检索（精简大气：单输入框 + 图标） ----------
-type LogicalConnector = 'and' | 'or' | 'end';
-
 type AdvancedValueType = 'ip' | 'port' | 'protocol' | 'action' | 'text' | 'number';
 
 interface AdvancedField {
@@ -200,21 +199,13 @@ interface AdvancedField {
   valueType: AdvancedValueType;
 }
 
-interface AdvancedCondition {
-  id: string;
-  fieldKey: string;
-  fieldLabel: string;
-  valueType: AdvancedValueType;
-  operator: string;
-  values: string[];
-  connector: LogicalConnector;
-}
-
-const searchMode = ref<'normal' | 'advanced'>('advanced');
-/** 普通/高级共用：单行多条件输入。普通：策略名称、ID、动作、源IP、目的IP、端口 空格/逗号分隔；高级：字段:值, 字段:值 */
+const searchMode = ref<'normal' | 'advanced'>('normal');
+/** 普通/高级共用：普通为自由文本；高级为字段构建表达式 */
 const searchInput = ref('');
 const anyMode = ref<SearchParams['anyMode']>('');
-const matchMode = ref<SearchParams['matchMode']>('all');
+const matchMode = ref<SearchParams['matchMode']>('partial');
+/** 从收藏回显高级表达式时，在尚未重建 token 前用于检索 */
+const appliedAdvancedQueryRef = ref<string | null>(null);
 const tagFilters = ref<TagFilterItem[]>([]);
 
 /** 高级检索可匹配字段（含类型信息） */
@@ -243,9 +234,6 @@ const ADVANCED_FIELDS: AdvancedField[] = [
   { key: 'action', label: '动作', valueType: 'action' },
 ];
 
-const PROTOCOL_OPTIONS = ['tcp', 'udp', 'icmp'];
-const ACTION_OPTIONS = ['允许', '拒绝'];
-
 // -------- 高级检索：命令式编辑器（/ 命令面板 + 状态机）--------
 type AdvPhase = 'field' | 'command' | 'operator' | 'value' | 'connector';
 type AdvToken =
@@ -260,6 +248,20 @@ const advInputRef = ref<HTMLInputElement | null>(null);
 const advMenuOpen = ref(false);
 const advMenuIndex = ref(0);
 const advFieldSuggestions = ref<AdvancedField[]>([]);
+/** 从 / 命令选择「字段」后：字段面板为顶部搜索 + 全量/过滤列表 */
+const advFieldFromCommand = ref(false);
+const advFieldPanelSearchKeyword = ref('');
+const advFieldSearchInputRef = ref<{ focus: () => void } | null>(null);
+
+const advDisplayedFieldList = computed(() => {
+  const kw = advFieldPanelSearchKeyword.value.trim().toLowerCase();
+  if (!kw) return ADVANCED_FIELDS;
+  return ADVANCED_FIELDS.filter((f) => f.label.toLowerCase().includes(kw));
+});
+
+watch(advFieldPanelSearchKeyword, () => {
+  advMenuIndex.value = 0;
+});
 
 const advCurrentField = ref<AdvancedField | null>(null);
 const advCurrentOperator = ref<string>('');
@@ -308,6 +310,97 @@ watch(advancedExpressionText, (text) => {
   if (searchMode.value === 'advanced') searchInput.value = text;
 });
 
+watch(
+  advTokens,
+  () => {
+    if (appliedAdvancedQueryRef.value && advTokens.value.length > 0) {
+      appliedAdvancedQueryRef.value = null;
+    }
+  },
+  { deep: true }
+);
+
+const matchModeOptions: {
+  value: SearchParams['matchMode'];
+  label: string;
+  desc: string;
+}[] = [
+  {
+    value: 'fullInclude',
+    label: '全包含',
+    desc: '检索条件全部体现在结果条目中，检索条件范围≤结果条目范围',
+  },
+  {
+    value: 'exclude',
+    label: '排除条件',
+    desc: '结果条目完全排除所输入的检索条件',
+  },
+  {
+    value: 'equal',
+    label: '相等',
+    desc: '检索条件与结果条目完全一致',
+  },
+  {
+    value: 'partial',
+    label: '部分匹配',
+    desc: '结果条目满足检索条件中的任意一项',
+  },
+];
+
+const rowsForFieldStats = computed(() => {
+  const ids = selectedDeviceIds.value;
+  if (ids?.length) return mockPolicies.filter((p) => ids.includes(p.deviceId));
+  return mockPolicies;
+});
+
+const normalFieldStats = computed(() => {
+  if (searchMode.value !== 'normal') return [] as { label: string; count: number }[];
+  const q = searchInput.value.trim();
+  if (!q) return [];
+  return computeNormalFieldStats(rowsForFieldStats.value, q);
+});
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+const highlightQuerySource = computed(() => {
+  if (searchMode.value === 'normal') return searchInput.value.trim();
+  return (appliedAdvancedQueryRef.value ?? advancedExpressionText.value ?? '').trim();
+});
+
+function buildHighlightHtml(text: string, query: string): string {
+  const raw = String(text ?? '');
+  const q = query.trim();
+  if (!q) return escapeHtml(raw);
+  const tokens = tokenizeQuery(q);
+  if (!tokens.length) return escapeHtml(raw);
+  const pattern = tokens
+    .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .filter(Boolean)
+    .join('|');
+  if (!pattern) return escapeHtml(raw);
+  const parts = raw.split(new RegExp(`(${pattern})`, 'gi'));
+  return parts
+    .map((part) => {
+      if (part === '') return '';
+      const test = new RegExp(`^(${pattern})$`, 'i');
+      if (test.test(part)) {
+        return `<mark class="search-hit">${escapeHtml(part)}</mark>`;
+      }
+      return escapeHtml(part);
+    })
+    .join('');
+}
+
+function highlightSearchHtml(text: string | number | undefined | null): string {
+  return buildHighlightHtml(String(text ?? ''), highlightQuerySource.value);
+}
+
 function advOpenMenu() {
   advMenuOpen.value = true;
   advMenuIndex.value = 0;
@@ -326,6 +419,16 @@ function advSearchFields(q: string) {
   advFieldSuggestions.value = ADVANCED_FIELDS.filter((f) => f.label.toLowerCase().includes(kw));
 }
 
+function advOpenFieldPanelFromCommand() {
+  advFieldFromCommand.value = true;
+  advFieldPanelSearchKeyword.value = '';
+  advMenuIndex.value = 0;
+  advOpenMenu();
+  nextTick(() => {
+    advFieldSearchInputRef.value?.focus?.();
+  });
+}
+
 function advFocusInput() {
   setTimeout(() => advInputRef.value?.focus(), 0);
 }
@@ -336,8 +439,7 @@ function advStartFieldEdit() {
   advCurrentValues.value = [];
   advPhase.value = 'field';
   advInput.value = '';
-  advCloseMenu();
-  advFocusInput();
+  advOpenFieldPanelFromCommand();
 }
 
 function advStartOperatorEdit() {
@@ -352,6 +454,8 @@ function advStartOperatorEdit() {
 }
 
 function advSelectField(f: AdvancedField) {
+  advFieldFromCommand.value = false;
+  advFieldPanelSearchKeyword.value = '';
   advCurrentField.value = f;
   advPhase.value = 'operator';
   advInput.value = '';
@@ -391,6 +495,7 @@ function advSelectCommand(key: AdvCommandKey) {
   advInput.value = '';
   if (key === 'field') {
     advPhase.value = 'field';
+    advOpenFieldPanelFromCommand();
     return;
   }
   if (key === 'operator') {
@@ -562,7 +667,17 @@ function advHandleInput() {
   if (advPhase.value === 'field') {
     if (advInput.value.startsWith('/')) {
       advPhase.value = 'command';
+      advFieldFromCommand.value = false;
       advOpenMenu();
+      return;
+    }
+    if (advFieldFromCommand.value) {
+      if (advInput.value.trim()) {
+        advFieldFromCommand.value = false;
+        advSearchFields(advInput.value);
+        advMenuOpen.value = true;
+        advMenuIndex.value = 0;
+      }
       return;
     }
     advSearchFields(advInput.value);
@@ -572,6 +687,23 @@ function advHandleInput() {
     } else {
       advCloseMenu();
     }
+  }
+}
+
+function advFieldSearchKeydown(e: Event | KeyboardEvent) {
+  if (!(e instanceof KeyboardEvent)) return;
+  const list = advDisplayedFieldList.value;
+  const len = list.length;
+  if (e.key === 'ArrowDown' && len) {
+    e.preventDefault();
+    advMenuIndex.value = (advMenuIndex.value + 1) % len;
+  } else if (e.key === 'ArrowUp' && len) {
+    e.preventDefault();
+    advMenuIndex.value = (advMenuIndex.value - 1 + len) % len;
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    const f = list[advMenuIndex.value];
+    if (f) advSelectField(f);
   }
 }
 
@@ -640,15 +772,18 @@ function advHandleKeydown(e: KeyboardEvent) {
 
   // 方向键选择
   if (advMenuOpen.value && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
-    const max = advPhase.value === 'command'
-      ? advCommands.length
-      : advPhase.value === 'operator'
-        ? availableOperators.value.length
-        : advPhase.value === 'connector'
-          ? 3
-          : advPhase.value === 'value' && advValueOptions.value.length
-            ? advValueOptions.value.length
-            : advFieldSuggestions.value.length;
+    const max =
+      advPhase.value === 'command'
+        ? advCommands.length
+        : advPhase.value === 'operator'
+          ? availableOperators.value.length
+          : advPhase.value === 'connector'
+            ? 3
+            : advPhase.value === 'value' && advValueOptions.value.length
+              ? advValueOptions.value.length
+              : advPhase.value === 'field' && advFieldFromCommand.value
+                ? advDisplayedFieldList.value.length
+                : advFieldSuggestions.value.length;
     if (max > 0) {
       if (e.key === 'ArrowDown') advMenuIndex.value = (advMenuIndex.value + 1) % max;
       else advMenuIndex.value = (advMenuIndex.value - 1 + max) % max;
@@ -668,7 +803,9 @@ function advHandleKeydown(e: KeyboardEvent) {
         return;
       }
       if (advPhase.value === 'field') {
-        const f = advFieldSuggestions.value[advMenuIndex.value];
+        const f = advFieldFromCommand.value
+          ? advDisplayedFieldList.value[advMenuIndex.value]
+          : advFieldSuggestions.value[advMenuIndex.value];
         if (f) advSelectField(f);
         return;
       }
@@ -713,6 +850,8 @@ const resetAdvancedBuilder = () => {
   advMenuOpen.value = false;
   advMenuIndex.value = 0;
   advFieldSuggestions.value = [];
+  advFieldFromCommand.value = false;
+  advFieldPanelSearchKeyword.value = '';
   advCurrentField.value = null;
   advCurrentOperator.value = '';
   advCurrentValues.value = [];
@@ -734,7 +873,10 @@ function validateIp(v: string): boolean {
     });
   }
   if (cidr.test(value)) {
-    const [ipPart, maskPart] = value.split('/');
+    const segs = value.split('/');
+    const ipPart = segs[0];
+    const maskPart = segs[1];
+    if (!ipPart || maskPart === undefined) return false;
     const mask = parseInt(maskPart, 10);
     if (mask < 0 || mask > 32) return false;
     return ipPart.split('.').every((n) => {
@@ -744,8 +886,9 @@ function validateIp(v: string): boolean {
   }
   const rangeMatch = value.match(range);
   if (rangeMatch) {
-    const left = rangeMatch[1].trim();
-    const right = rangeMatch[2].trim();
+    const left = rangeMatch[1]?.trim() ?? '';
+    const right = rangeMatch[2]?.trim() ?? '';
+    if (!left || !right) return false;
     return validateIp(left) && validateIp(right);
   }
   return false;
@@ -761,8 +904,8 @@ function validatePort(v: string): boolean {
   // 区间
   const m = value.match(/^(\d+)-(\d+)$/);
   if (m) {
-    const start = parseInt(m[1], 10);
-    const end = parseInt(m[2], 10);
+    const start = parseInt(m[1] ?? '0', 10);
+    const end = parseInt(m[2] ?? '0', 10);
     if ([start, end].some((n) => Number.isNaN(n))) return false;
     if (start < 1 || end > 65535) return false;
     return start <= end;
@@ -781,18 +924,11 @@ function validateAdvancedInput(): string | null {
   return null;
 }
 
-/** 从单行输入解析普通检索：策略名称、ID、动作、源IP、目的IP、端口 */
-function parseNormalInput(): { policyNameOrId?: string; action?: string; srcIp?: string; dstIp?: string; port?: string } {
-  const raw = searchInput.value.trim().replace(/,/g, ' ').replace(/\s+/g, ' ').trim();
-  if (!raw) return {};
-  const parts = raw.split(' ');
-  return {
-    policyNameOrId: parts[0] || undefined,
-    action: parts[1] || undefined,
-    srcIp: parts[2] || undefined,
-    dstIp: parts[3] || undefined,
-    port: parts[4] || undefined,
-  };
+function normalizeMatchModeLocal(m: string | undefined): SearchParams['matchMode'] {
+  if (m === 'all') return 'partial';
+  if (m === 'include') return 'fullInclude';
+  if (m === 'fullInclude' || m === 'exclude' || m === 'equal' || m === 'partial') return m;
+  return 'partial';
 }
 
 const searchParams = computed<SearchParams>(() => {
@@ -801,23 +937,21 @@ const searchParams = computed<SearchParams>(() => {
     matchMode: matchMode.value,
     deviceIds: selectedDeviceIds.value,
     tagFilters: tagFilters.value,
+    searchMode: searchMode.value,
   };
   if (searchMode.value === 'advanced') {
-    return { ...base, queryText: advancedExpressionText.value || undefined };
+    const q = appliedAdvancedQueryRef.value ?? advancedExpressionText.value;
+    return { ...base, queryText: q?.trim() || undefined };
   }
-  const p = parseNormalInput();
   return {
     ...base,
-    policyNameOrId: p.policyNameOrId,
-    action: p.action,
-    srcIp: p.srcIp,
-    dstIp: p.dstIp,
-    port: p.port,
+    normalQueryText: searchInput.value.trim() || undefined,
   };
 });
 
 function getSearchInputFromParams(p: Partial<SearchParams>): string {
-  if (p?.queryText) return p.queryText;
+  if (p?.searchMode === 'advanced' && p?.queryText) return p.queryText;
+  if (p?.normalQueryText) return p.normalQueryText;
   const arr = [p?.policyNameOrId, p?.action, p?.srcIp, p?.dstIp, p?.port].filter(Boolean);
   return arr.join(' ');
 }
@@ -830,6 +964,7 @@ const doSearch = () => {
       return;
     }
   }
+  fieldDistFilterLabel.value = null;
   loading.value = true;
   currentPage.value = 1;
   setTimeout(() => {
@@ -848,22 +983,37 @@ const resetSearch = () => {
   suppressAutoSearch.value = true;
   searchInput.value = '';
   anyMode.value = '';
-  matchMode.value = 'all';
+  matchMode.value = 'partial';
   tagFilters.value = [];
+  fieldDistFilterLabel.value = null;
+  appliedAdvancedQueryRef.value = null;
   resetAdvancedBuilder();
-  // 放开自动检索
   setTimeout(() => {
     suppressAutoSearch.value = false;
+    doSearch();
   }, 0);
 };
 
 const toggleToAdvancedMode = () => {
   searchMode.value = 'advanced';
+  appliedAdvancedQueryRef.value = null;
   searchInput.value = advancedExpressionText.value || '';
 };
 const toggleToNormalMode = () => {
   searchMode.value = 'normal';
+  appliedAdvancedQueryRef.value = null;
 };
+
+function switchSearchMode(mode: 'normal' | 'advanced') {
+  fieldDistFilterLabel.value = null;
+  if (mode === 'advanced') toggleToAdvancedMode();
+  else toggleToNormalMode();
+}
+
+/** 供模板中模式切换按钮使用，避免 v-if 分支内对 searchMode 类型收窄导致误判 */
+function isSearchMode(mode: 'normal' | 'advanced') {
+  return searchMode.value === mode;
+}
 
 const onSearchKeydown = (e: Event) => {
   if (searchMode.value === 'advanced') return;
@@ -881,10 +1031,22 @@ const loadCommonSearches = () => {
   }
 };
 const saveAsCommon = () => {
+  if (searchMode.value === 'advanced') {
+    if (!advancedExpressionText.value?.trim()) {
+      ElMessage.warning('请输入检索条件后再收藏');
+      return;
+    }
+  } else if (!searchInput.value.trim()) {
+    ElMessage.warning('请输入检索条件后再收藏');
+    return;
+  }
   const list = [...commonSearches.value];
   const item: CommonSearchItem = {
     id: Date.now().toString(),
-    label: searchInput.value?.slice(0, 20) || '未命名条件',
+    label:
+      searchMode.value === 'advanced'
+        ? advancedExpressionText.value?.slice(0, 20) || '未命名条件'
+        : searchInput.value?.slice(0, 20) || '未命名条件',
     params: { ...searchParams.value },
     createdAt: Date.now(),
   };
@@ -900,12 +1062,24 @@ const removeCommon = (id: string) => {
 };
 const applyCommon = (item: CommonSearchItem) => {
   const p = item.params;
+  if (p.searchMode === 'advanced' && p.queryText) {
+    appliedAdvancedQueryRef.value = p.queryText as string;
+  } else {
+    appliedAdvancedQueryRef.value = null;
+  }
+  if (p.searchMode) {
+    searchMode.value = p.searchMode;
+  } else if (p.queryText && !p.normalQueryText) {
+    searchMode.value = 'advanced';
+  } else {
+    searchMode.value = 'normal';
+  }
   searchInput.value =
-    p && 'queryText' in p && p.queryText
+    p && 'queryText' in p && p.queryText && searchMode.value === 'advanced'
       ? (p.queryText as string)
       : getSearchInputFromParams(p ?? {}) ?? '';
   if (p?.anyMode !== undefined) anyMode.value = p.anyMode;
-  if (p?.matchMode) matchMode.value = p.matchMode ?? 'all';
+  if (p?.matchMode) matchMode.value = normalizeMatchModeLocal(p.matchMode as string);
   if (p?.tagFilters) tagFilters.value = p.tagFilters ?? [];
   doSearch();
 };
@@ -920,8 +1094,12 @@ function refreshTagStats() {
   doSearch();
 }
 
-// 标签过滤 - 显示配置（业务最多 10 个）
+// 标签过滤 - 大类开关（未勾选则整类不展示，子项勾选无效）；子项在勾选大类后生效
 const tagSettingVisible = ref(false);
+const lifecycleCategoryEnabled = ref(true);
+const qualityCategoryEnabled = ref(true);
+const riskCategoryEnabled = ref(true);
+const businessCategoryEnabled = ref(true);
 const lifecycleVisibleKeys = ref<string[]>(Object.keys(mockTagStats.lifecycle));
 const qualityVisibleKeys = ref<string[]>(Object.keys(mockTagStats.quality));
 const riskVisibleKeys = ref<string[]>(Object.keys(mockTagStats.risk ?? {}));
@@ -972,15 +1150,15 @@ const visibleLifecycleEntries = computed(() =>
     .filter(([k]) => lifecycleVisibleKeys.value.includes(k))
     .map(([k, v]) => ({ key: k, label: LIFECYCLE_LABELS[k] ?? k, count: v }))
 );
-const visibleRiskEntries = computed(() =>
-  Object.entries(tagStats.value.risk ?? {})
-    .filter(([k]) => riskVisibleKeys.value.includes(k))
-    .map(([k, v]) => ({ key: k, label: RISK_LABELS[k] ?? k, count: v }))
-);
 const visibleQualityEntries = computed(() =>
   Object.entries(tagStats.value.quality)
     .filter(([k]) => qualityVisibleKeys.value.includes(k))
     .map(([k, v]) => ({ key: k, label: QUALITY_LABELS[k] ?? k, count: v }))
+);
+const visibleRiskEntries = computed(() =>
+  Object.entries(tagStats.value.risk ?? {})
+    .filter(([k]) => riskVisibleKeys.value.includes(k))
+    .map(([k, v]) => ({ key: k, label: RISK_LABELS[k] ?? k, count: v }))
 );
 const visibleBusinessEntries = computed(() =>
   Object.entries(tagStats.value.business)
@@ -1059,6 +1237,29 @@ const isTagSelected = (category: string, key: string) =>
 // ---------- 列表与分页 ----------
 const loading = ref(false);
 const tableData = ref<PolicyRow[]>([]);
+/** 条件分布：点击标签后仅保留该字段命中当前检索词的行 */
+const fieldDistFilterLabel = ref<string | null>(null);
+
+/** 有检索/条件可清空时显示重置按钮 */
+const showResetSearchIcon = computed(() => {
+  if (searchMode.value === 'normal') {
+    if (searchInput.value.trim()) return true;
+    if (anyMode.value === 'include' || anyMode.value === 'exclude') return true;
+    if (matchMode.value !== 'partial') return true;
+    if (fieldDistFilterLabel.value) return true;
+    return false;
+  }
+  const expr = (appliedAdvancedQueryRef.value ?? advancedExpressionText.value ?? '').trim();
+  if (expr) return true;
+  if (advTokens.value.length > 0) return true;
+  if (advInput.value.trim()) return true;
+  if (advCurrentField.value || advCurrentOperator.value || advCurrentValues.value.length > 0) return true;
+  return false;
+});
+
+watch(searchInput, () => {
+  fieldDistFilterLabel.value = null;
+});
 const policyTableContainerRef = ref<HTMLElement | null>(null);
 const tableMaxHeight = ref<number | string>(400);
 let tableResizeObserver: ResizeObserver | null = null;
@@ -1079,6 +1280,15 @@ onUnmounted(() => {
 const total = ref(0);
 const pageSize = ref(10);
 const currentPage = ref(1);
+
+function toggleFieldDistFilter(label: string) {
+  if (fieldDistFilterLabel.value === label) {
+    fieldDistFilterLabel.value = null;
+  } else {
+    fieldDistFilterLabel.value = label;
+    currentPage.value = 1;
+  }
+}
 
 function createEmptyRow(): PolicyRow {
   return {
@@ -1111,9 +1321,25 @@ function createEmptyRow(): PolicyRow {
   };
 }
 
+const tableDataForPagination = computed(() => {
+  const base = tableData.value.filter((r) => r.id);
+  if (!fieldDistFilterLabel.value || searchMode.value !== 'normal' || !searchInput.value.trim()) {
+    return base;
+  }
+  const q = searchInput.value.trim();
+  return base.filter((r) => policyRowMatchesFieldLabel(r, fieldDistFilterLabel.value!, q));
+});
+
+const displayTotal = computed(() => tableDataForPagination.value.length);
+
+watch(displayTotal, (t) => {
+  const maxP = Math.max(1, Math.ceil(t / pageSize.value) || 1);
+  if (currentPage.value > maxP) currentPage.value = maxP;
+});
+
 const paginatedTableData = computed(() => {
   const start = (currentPage.value - 1) * pageSize.value;
-  const slice = tableData.value.slice(start, start + pageSize.value);
+  const slice = tableDataForPagination.value.slice(start, start + pageSize.value);
   if (slice.length >= pageSize.value) return slice;
   const padCount = pageSize.value - slice.length;
   return [...slice, ...Array.from({ length: padCount }, () => createEmptyRow())];
@@ -1131,14 +1357,6 @@ function onSizeChange(size: number) {
   currentPage.value = 1;
 }
 
-function openCompliance() {
-  const loadingInstance = ElLoading.service({ text: '合规分析中请稍等' });
-  setTimeout(() => loadingInstance.close(), 1500);
-}
-function openHitAnalysis() {
-  ElMessage.info('命中分析（URL 占位）');
-}
-
 // 操作栏：仅保留详情、回收
 const OPERATIONS = [
   { key: 'detail', label: '详情', handler: (row?: PolicyRow) => { if (row?.id) { rowDetailData.value = row; rowDetailVisible.value = true; } } },
@@ -1153,7 +1371,6 @@ const optimizeVisible = ref(false);
 
 // 策略明细弹窗
 const detailMaximized = ref(false);
-const VALID_IP_TOOLTIP = '1、源区域与源IP有交叉部分为有效IP；\n2、目的区域与目的IP交叉部分为有效目的IP';
 const TAG_COLORS = ['#67c23a', '#409eff', '#e6a23c', '#f56c6c', '#909399'];
 // 策略明细弹窗用虚拟数据
 const detailServiceList = [
@@ -1175,15 +1392,6 @@ const detailHitInfo = [
   { label: '源IP', percentage: 45, count: 12 },
   { label: '目的IP', percentage: 55, count: 14 },
 ];
-function detailPolicyDesc(d: PolicyRow | null): string {
-  if (!d) return '';
-  const status = d.enabled ? '启用' : '停用';
-  const action = d.action === 'allow' ? '允许' : '拒绝';
-  const src = [d.srcZone, (d.srcIp && d.srcIp.length) ? d.srcIp.join('，') : ''].filter(Boolean).join('，');
-  const dst = [d.dstZone, (d.dstIp && d.dstIp.length) ? d.dstIp.join('，') : ''].filter(Boolean).join('，');
-  const svc = (d.service && d.service.length) ? d.service.join(',') : '-';
-  return `${d.name || d.id}/${d.id}（${status}）：${src} > ${dst}：${svc}，${action}`;
-}
 /** 源 IP hover 行：直接 IP 单独一行，对象名一行 + 对象 IP 每行加点 */
 function srcIpHoverLines(row: PolicyRow): string[] {
   const lines: string[] = [];
@@ -1357,7 +1565,7 @@ function batchColumnOp(op: 'hide' | 'show' | 'pinTop' | 'pinBottom' | 'moveUp' |
       const idx = sorted.findIndex((x) => x.key === c.key);
       if (idx > 0) {
         const prev = sorted[idx - 1];
-        if (!keys.has(prev.key)) {
+        if (prev && !keys.has(prev.key)) {
           [c.order, prev.order] = [prev.order, c.order];
         }
       }
@@ -1367,7 +1575,7 @@ function batchColumnOp(op: 'hide' | 'show' | 'pinTop' | 'pinBottom' | 'moveUp' |
       const idx = sorted.findIndex((x) => x.key === c.key);
       if (idx >= 0 && idx < sorted.length - 1) {
         const next = sorted[idx + 1];
-        if (!keys.has(next.key)) {
+        if (next && !keys.has(next.key)) {
           [c.order, next.order] = [next.order, c.order];
         }
       }
@@ -1419,36 +1627,8 @@ watch(
   { deep: true }
 );
 
-function formatHitCount(n: number) {
-  if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
-  return String(n);
-}
-
-function formatHitDate(v: string): string {
-  if (!v) return '-';
-  const parts = v.split(' ');
-  return parts[0] || v;
-}
-
 function natRulesTooltip(rules: NatRule[] | undefined): string {
   return rules?.map((r) => `${r.fromIp}转${r.toIp}:${r.ruleName}${r.valid ? '有效' : '无效'}`).join('\n') || '';
-}
-const remarkTip = (row: PolicyRow) => {
-  if (row.remarkFlags?.empty) return '策略备注为空';
-  if (row.remarkFlags?.missingOwner) return '无相关负责人';
-  if (row.remarkFlags?.missingPurpose) return '无相关用途描述';
-  return row.remark || '';
-};
-
-function combinedTagsDisplay(row: PolicyRow): { text: string; type: 'line' | 'business' }[] {
-  const items: { text: string; type: 'line' | 'business' }[] = [];
-  (row.lines || []).forEach((l) => items.push({ text: l, type: 'line' }));
-  (row.tags || []).forEach((t) => items.push({ text: t, type: 'business' }));
-  return items;
-}
-function tagsCombinedTip(row: PolicyRow): string {
-  const all = [...(row.lines || []), ...(row.tags || [])];
-  return all.length ? all.join('，') : '-';
 }
 function optimizeTagsDisplay(row: PolicyRow): string[] {
   const risk = (row.riskFlags || []).map((k) => OPTIMIZE_LABELS[k] ?? RISK_LABELS[k] ?? k);
@@ -1692,16 +1872,6 @@ const tagEditTagDisplay = computed(() =>
     .map((id) => tagListForEdit.value.find((t) => t.id === id)?.name ?? id)
     .join('，')
 );
-function openTagEditWithSelection() {
-  const sel = selectedRows.value.length ? [...selectedRows.value] : [];
-  tagEditPolicies.value = sel;
-  tagEditPolicyIds.value = sel.map((r) => r.id);
-  tagEditTagIds.value = [];
-  tagEditPolicyPopoverVisible.value = false;
-  tagEditTagPopoverVisible.value = false;
-  tagEditVisible.value = true;
-}
-
 watch(tagEditPolicyPopoverVisible, (visible) => {
   if (visible && tagEditPolicyIds.value.length) {
     nextTick(() => {
@@ -1828,67 +1998,179 @@ doSearch();
 
       <!-- 右侧 -->
       <div class="right-panel">
-        <!-- 检索栏：单输入框 + 图标（精简大气）；高级模式为同一输入框内标签+构建 -->
-        <div class="search-bar">
-          <div class="search-row">
-            <!-- 普通模式：原有单输入框 -->
-            <ElInput
-              v-if="searchMode === 'normal'"
-              v-model="searchInput"
-              placeholder="策略名称、ID、动作、源IP、目的IP、端口（多条件空格或逗号分隔）"
-              clearable
-              size="large"
-              class="search-input"
-              @keydown="onSearchKeydown"
-            >
-              <template #prefix>
-                <ElTooltip :content="'当前：普通检索（点击切换高级）'">
-                  <ElIcon class="search-icon" @click="toggleToAdvancedMode">
-                    <Grid />
-                  </ElIcon>
-                </ElTooltip>
-              </template>
-              <template #suffix>
-                <span class="search-suffix">
-                  <ElSelect v-model="matchMode" size="small" class="match-select" placeholder="匹配">
-                    <ElOption label="全匹配" value="all" />
-                    <ElOption label="排除输入" value="exclude" />
-                    <ElOption label="相等" value="equal" />
-                    <ElOption label="部分匹配" value="partial" />
-                  </ElSelect>
-                  <ElTooltip content="含any：结果中源/目的/服务含 any 的项">
-                    <span
-                      class="any-icon any-icon--include"
-                      :class="{ 'any-icon--active': anyMode === 'include' }"
-                      @click="anyMode = anyMode === 'include' ? '' : 'include'"
-                    >any</span>
-                  </ElTooltip>
-                  <ElTooltip content="不含any：排除源/目的/服务含 any 的项">
-                    <span
-                      class="any-icon any-icon--exclude"
-                      :class="{ 'any-icon--active': anyMode === 'exclude' }"
-                      @click="anyMode = anyMode === 'exclude' ? '' : 'exclude'"
-                    ><span class="any-icon-slash">any</span></span>
-                  </ElTooltip>
-                  <ElTooltip content="重置">
-                    <ElIcon class="search-icon" @click="resetSearch"><Refresh /></ElIcon>
-                  </ElTooltip>
-                  <ElTooltip content="收藏当前条件">
-                    <ElIcon class="search-icon" @click="saveAsCommon"><Star /></ElIcon>
-                  </ElTooltip>
-                  <ElButton type="primary" size="small" :icon="Search" @click="doSearch" />
-                </span>
-              </template>
-            </ElInput>
-            <!-- 高级模式：同一输入框内展示已添加条件标签 + 当前构建 + 连接词，选 and/or 自动下一轮 -->
-            <div v-else class="search-input search-input--advanced">
-              <span class="search-input__prefix">
-                <ElTooltip content="当前：高级检索（点击切换普通）">
-                  <ElIcon class="search-icon" @click="toggleToNormalMode">
-                    <SetUp />
-                  </ElIcon>
-                </ElTooltip>
-              </span>
+        <!-- 检索栏：搜索引擎风格；普通/高级明确切换 -->
+        <div class="search-bar search-bar--engine">
+          <div v-if="searchMode === 'normal'" class="search-normal-wrap">
+            <div class="search-row search-row--engine">
+              <ElInput
+                v-model="searchInput"
+                placeholder="请输入检索的条件"
+                size="large"
+                class="search-input search-input--engine"
+                @keydown="onSearchKeydown"
+              >
+                <template #prefix>
+                  <div class="search-mode-tabs-wrap search-mode-tabs-wrap--in-input">
+                    <div class="search-mode-tabs" role="tablist">
+                      <button
+                        type="button"
+                        class="search-mode-tab"
+                        :class="{ 'is-active': isSearchMode('normal') }"
+                        role="tab"
+                        :aria-selected="isSearchMode('normal')"
+                        @click="switchSearchMode('normal')"
+                      >
+                        普通检索
+                      </button>
+                      <button
+                        type="button"
+                        class="search-mode-tab"
+                        :class="{ 'is-active': isSearchMode('advanced') }"
+                        role="tab"
+                        :aria-selected="isSearchMode('advanced')"
+                        @click="switchSearchMode('advanced')"
+                      >
+                        高级检索
+                      </button>
+                    </div>
+                  </div>
+                </template>
+                <template #suffix>
+                  <span class="search-suffix search-suffix--compact">
+                    <ElTooltip v-if="showResetSearchIcon" content="清空条件">
+                      <span class="search-reset-btn" role="button" tabindex="0" @click="resetSearch">
+                        <ElIcon class="search-reset-btn__icon"><Close /></ElIcon>
+                      </span>
+                    </ElTooltip>
+                    <span class="search-suffix-end">
+                      <ElTooltip content="收藏当前条件">
+                        <ElIcon class="search-icon" @click="saveAsCommon"><Star /></ElIcon>
+                      </ElTooltip>
+                      <ElButton
+                        type="primary"
+                        size="small"
+                        class="search-submit-btn"
+                        :icon="Search"
+                        aria-label="搜索"
+                        @click="doSearch"
+                      />
+                    </span>
+                  </span>
+                </template>
+              </ElInput>
+              <ElPopover
+                placement="bottom-end"
+                :width="360"
+                trigger="click"
+                popper-class="more-search-popover-wrap"
+              >
+                <template #reference>
+                  <button
+                    type="button"
+                    class="more-search-link more-search-link--icon-only"
+                    aria-label="更多检索条件"
+                    title="更多检索条件"
+                  >
+                    <ElIcon class="more-search-link__icon"><MoreFilled /></ElIcon>
+                  </button>
+                </template>
+                <div class="more-search-popover">
+                  <div class="more-search-popover__row">
+                    <span class="more-search-popover__label">匹配方式</span>
+                    <div class="more-search-popover__buttons">
+                      <ElTooltip
+                        v-for="m in matchModeOptions"
+                        :key="m.value"
+                        placement="top"
+                        popper-class="match-mode-tooltip-popper"
+                      >
+                        <template #content>
+                          <div class="match-mode-tip">
+                            <div class="match-mode-tip__title">{{ m.label }}</div>
+                            <p class="match-mode-tip__desc">{{ m.desc }}</p>
+                          </div>
+                        </template>
+                        <button
+                          type="button"
+                          class="more-search-pill"
+                          :class="{ 'is-active': matchMode === m.value }"
+                          @click="matchMode = m.value"
+                        >
+                          {{ m.label }}
+                        </button>
+                      </ElTooltip>
+                    </div>
+                  </div>
+                  <div v-if="searchMode === 'normal'" class="more-search-popover__row">
+                    <span class="more-search-popover__label">是否含 any</span>
+                    <div class="more-search-popover__buttons">
+                      <ElTooltip placement="top" popper-class="match-mode-tooltip-popper">
+                        <template #content>
+                          <div class="match-mode-tip">
+                            <div class="match-mode-tip__title">是</div>
+                            <p class="match-mode-tip__desc">结果条目需过滤出含 any 的策略（源/目的/服务）</p>
+                          </div>
+                        </template>
+                        <button
+                          type="button"
+                          class="more-search-pill"
+                          :class="{ 'is-active': anyMode === 'include' }"
+                          @click="anyMode = anyMode === 'include' ? '' : 'include'"
+                        >
+                          是
+                        </button>
+                      </ElTooltip>
+                      <ElTooltip placement="top" popper-class="match-mode-tooltip-popper">
+                        <template #content>
+                          <div class="match-mode-tip">
+                            <div class="match-mode-tip__title">否</div>
+                            <p class="match-mode-tip__desc">结果条目需过滤出不含 any 的策略</p>
+                          </div>
+                        </template>
+                        <button
+                          type="button"
+                          class="more-search-pill"
+                          :class="{ 'is-active': anyMode === 'exclude' }"
+                          @click="anyMode = anyMode === 'exclude' ? '' : 'exclude'"
+                        >
+                          否
+                        </button>
+                      </ElTooltip>
+                    </div>
+                  </div>
+                </div>
+              </ElPopover>
+            </div>
+          </div>
+
+          <div v-else class="search-advanced-wrap">
+            <!-- 高级模式：同一输入框内展示已添加条件标签 + 当前构建 + 连接词 -->
+            <div class="search-row search-row--engine">
+              <div class="search-input search-input--engine search-input--advanced">
+              <div class="search-mode-tabs-wrap search-mode-tabs-wrap--in-input">
+                <div class="search-mode-tabs" role="tablist">
+                  <button
+                    type="button"
+                    class="search-mode-tab"
+                    :class="{ 'is-active': isSearchMode('normal') }"
+                    role="tab"
+                    :aria-selected="isSearchMode('normal')"
+                    @click="switchSearchMode('normal')"
+                  >
+                    普通检索
+                  </button>
+                  <button
+                    type="button"
+                    class="search-mode-tab"
+                    :class="{ 'is-active': isSearchMode('advanced') }"
+                    role="tab"
+                    :aria-selected="isSearchMode('advanced')"
+                    @click="switchSearchMode('advanced')"
+                  >
+                    高级检索
+                  </button>
+                </div>
+              </div>
               <div class="search-input__inner search-input__inner--advanced">
                 <!-- 已添加 token（条件/连接词/括号） -->
                 <template v-for="t in advTokens" :key="t.id">
@@ -1949,7 +2231,33 @@ doSearch();
                         {{ c.label }}
                       </div>
                     </template>
-                    <!-- 字段匹配 -->
+                    <!-- 字段匹配：从 / 选「字段」或「字段」编辑时：顶部搜索 + 全量/过滤列表 -->
+                    <template v-else-if="advPhase === 'field' && advFieldFromCommand">
+                      <div class="adv-field-panel-search">
+                        <ElInput
+                          ref="advFieldSearchInputRef"
+                          v-model="advFieldPanelSearchKeyword"
+                          size="small"
+                          placeholder="搜索字段，Enter 过滤并确认选中"
+                          @keydown.stop="advFieldSearchKeydown"
+                        />
+                      </div>
+                      <div
+                        v-for="(f, idx) in advDisplayedFieldList"
+                        :key="f.key"
+                        class="adv-inline-option"
+                        :class="{ 'is-active': idx === advMenuIndex }"
+                        @mousedown.prevent="advSelectField(f)"
+                      >
+                        {{ f.label }}
+                      </div>
+                      <div
+                        v-if="!advDisplayedFieldList.length"
+                        class="adv-inline-option adv-inline-option--empty"
+                      >
+                        无匹配字段
+                      </div>
+                    </template>
                     <template v-else-if="advPhase === 'field'">
                       <div
                         v-for="(f, idx) in advFieldSuggestions"
@@ -2001,19 +2309,33 @@ doSearch();
                   </div>
                 </div>
               </div>
-              <span class="search-input__suffix">
-                <ElTooltip content="重置">
-                  <ElIcon class="search-icon" @click="resetSearch"><Refresh /></ElIcon>
+              <span class="search-input__suffix search-suffix search-suffix--compact">
+                <ElTooltip v-if="showResetSearchIcon" content="清空条件">
+                  <span class="search-reset-btn" role="button" tabindex="0" @click="resetSearch">
+                    <ElIcon class="search-reset-btn__icon"><Close /></ElIcon>
+                  </span>
                 </ElTooltip>
-                <ElTooltip content="收藏当前条件">
-                  <ElIcon class="search-icon" @click="saveAsCommon"><Star /></ElIcon>
-                </ElTooltip>
-                <ElButton type="primary" size="small" :icon="Search" @click="doSearch" />
+                <span class="search-suffix-end">
+                  <ElTooltip content="收藏当前条件">
+                    <ElIcon class="search-icon" @click="saveAsCommon"><Star /></ElIcon>
+                  </ElTooltip>
+                  <ElButton
+                    type="primary"
+                    size="small"
+                    class="search-submit-btn"
+                    :icon="Search"
+                    aria-label="搜索"
+                    @click="doSearch"
+                  />
+                </span>
               </span>
             </div>
+            <span class="search-engine-more-spacer" aria-hidden="true" />
+            </div>
           </div>
-          <div class="common-searches">
-            <span class="common-label">常用：</span>
+
+          <div v-if="commonSearches.length" class="common-searches">
+            <span class="common-label">收藏条件：</span>
             <div class="common-tags">
               <ElTag
                 v-for="c in commonSearches"
@@ -2025,6 +2347,22 @@ doSearch();
               >
                 {{ c.label }}
               </ElTag>
+            </div>
+          </div>
+
+          <div v-if="searchMode === 'normal' && normalFieldStats.length" class="field-stats-bar">
+            <span class="field-stats-label">条件分布</span>
+            <div class="field-stats-tags">
+              <button
+                v-for="s in normalFieldStats"
+                :key="s.label"
+                type="button"
+                class="field-stat-chip"
+                :class="{ 'is-active': fieldDistFilterLabel === s.label }"
+                @click="toggleFieldDistFilter(s.label)"
+              >
+                {{ s.label }} <em class="field-stat-num">{{ s.count }}</em>
+              </button>
             </div>
           </div>
         </div>
@@ -2044,7 +2382,7 @@ doSearch();
             <ElIcon><ArrowDown v-if="tagStatsCollapsed" /><ArrowUp v-else /></ElIcon>
           </div>
           <div v-show="!tagStatsCollapsed" class="tag-stats-body">
-            <div class="tag-group">
+            <div v-if="lifecycleCategoryEnabled" class="tag-group">
               <span class="tag-group-title">
                 生命状态
                 <ElTooltip :content="LIFECYCLE_TOOLTIP" popper-class="tag-stats-tooltip-popper"><ElIcon class="tag-tip"><InfoFilled /></ElIcon></ElTooltip>
@@ -2060,23 +2398,7 @@ doSearch();
                 {{ it.label }} {{ it.count }}
               </ElTag>
             </div>
-            <div class="tag-group">
-              <span class="tag-group-title">
-                风险与合规
-                <ElTooltip :content="RISK_TOOLTIP" popper-class="tag-stats-tooltip-popper"><ElIcon class="tag-tip"><InfoFilled /></ElIcon></ElTooltip>
-              </span>
-              <ElTag
-                v-for="it in visibleRiskEntries"
-                :key="'r-' + it.key"
-                :type="isTagSelected('risk', it.key) ? 'primary' : 'info'"
-                size="small"
-                class="filter-tag"
-                @click="toggleTagFilter('risk', it.key, it.label)"
-              >
-                {{ it.label }} {{ it.count }}
-              </ElTag>
-            </div>
-            <div class="tag-group">
+            <div v-if="qualityCategoryEnabled" class="tag-group">
               <span class="tag-group-title">
                 策略质量
                 <ElTooltip :content="QUALITY_TOOLTIP" popper-class="tag-stats-tooltip-popper"><ElIcon class="tag-tip"><InfoFilled /></ElIcon></ElTooltip>
@@ -2092,7 +2414,23 @@ doSearch();
                 {{ it.label }} {{ it.count }}
               </ElTag>
             </div>
-            <div class="tag-group">
+            <div v-if="riskCategoryEnabled" class="tag-group">
+              <span class="tag-group-title">
+                风险与合规
+                <ElTooltip :content="RISK_TOOLTIP" popper-class="tag-stats-tooltip-popper"><ElIcon class="tag-tip"><InfoFilled /></ElIcon></ElTooltip>
+              </span>
+              <ElTag
+                v-for="it in visibleRiskEntries"
+                :key="'r-' + it.key"
+                :type="isTagSelected('risk', it.key) ? 'primary' : 'info'"
+                size="small"
+                class="filter-tag"
+                @click="toggleTagFilter('risk', it.key, it.label)"
+              >
+                {{ it.label }} {{ it.count }}
+              </ElTag>
+            </div>
+            <div v-if="businessCategoryEnabled" class="tag-group">
               <span class="tag-group-title">
                 业务标签
                 <ElTooltip :content="BUSINESS_TOOLTIP" popper-class="tag-stats-tooltip-popper"><ElIcon class="tag-tip"><InfoFilled /></ElIcon></ElTooltip>
@@ -2148,34 +2486,43 @@ doSearch();
         <ElDialog v-model="tagSettingVisible" title="标签过滤设置" width="620px">
           <div class="tag-setting-body">
             <div class="tag-setting-group">
-              <div class="tag-setting-title">生命状态</div>
-              <ElCheckboxGroup v-model="lifecycleVisibleKeys">
+              <ElCheckbox v-model="lifecycleCategoryEnabled" class="tag-setting-category-master">
+                显示「生命状态」大类
+              </ElCheckbox>
+              <ElCheckboxGroup v-model="lifecycleVisibleKeys" :disabled="!lifecycleCategoryEnabled">
                 <ElCheckbox v-for="k in Object.keys(tagStats.lifecycle)" :key="'sl-' + k" :label="k">
                   {{ LIFECYCLE_LABELS[k] ?? k }}
                 </ElCheckbox>
               </ElCheckboxGroup>
             </div>
             <div class="tag-setting-group">
-              <div class="tag-setting-title">风险与合规</div>
-              <ElCheckboxGroup v-model="riskVisibleKeys">
-                <ElCheckbox v-for="k in Object.keys(tagStats.risk || {})" :key="'sr-' + k" :label="k">
-                  {{ RISK_LABELS[k] ?? k }}
-                </ElCheckbox>
-              </ElCheckboxGroup>
-            </div>
-            <div class="tag-setting-group">
-              <div class="tag-setting-title">策略质量</div>
-              <ElCheckboxGroup v-model="qualityVisibleKeys">
+              <ElCheckbox v-model="qualityCategoryEnabled" class="tag-setting-category-master">
+                显示「策略质量」大类
+              </ElCheckbox>
+              <ElCheckboxGroup v-model="qualityVisibleKeys" :disabled="!qualityCategoryEnabled">
                 <ElCheckbox v-for="k in Object.keys(tagStats.quality)" :key="'sq-' + k" :label="k">
                   {{ QUALITY_LABELS[k] ?? k }}
                 </ElCheckbox>
               </ElCheckboxGroup>
             </div>
             <div class="tag-setting-group">
-              <div class="tag-setting-title">业务标签（最多 10 个）</div>
+              <ElCheckbox v-model="riskCategoryEnabled" class="tag-setting-category-master">
+                显示「风险与合规」大类
+              </ElCheckbox>
+              <ElCheckboxGroup v-model="riskVisibleKeys" :disabled="!riskCategoryEnabled">
+                <ElCheckbox v-for="k in Object.keys(tagStats.risk || {})" :key="'sr-' + k" :label="k">
+                  {{ RISK_LABELS[k] ?? k }}
+                </ElCheckbox>
+              </ElCheckboxGroup>
+            </div>
+            <div class="tag-setting-group">
+              <ElCheckbox v-model="businessCategoryEnabled" class="tag-setting-category-master">
+                显示「业务标签」大类
+              </ElCheckbox>
               <ElCheckboxGroup
                 v-model="businessVisibleKeys"
                 :max="10"
+                :disabled="!businessCategoryEnabled"
               >
                 <ElCheckbox v-for="k in Object.keys(tagStats.business)" :key="'sb-' + k" :label="k">
                   {{ k }}
@@ -2338,24 +2685,27 @@ doSearch();
             <ElTableColumn label="策略信息" min-width="120">
               <template #default="{ row }">
                 <div v-if="row.id" class="cell-two-line">
-                  <div class="cell-line cell-ellipsis">{{ row.name }}</div>
-                  <div class="cell-line cell-ellipsis">ID：{{ row.id }}</div>
+                  <div class="cell-line cell-ellipsis" v-html="highlightSearchHtml(row.name)" />
+                  <div class="cell-line cell-ellipsis">
+                    <span>ID：</span><span v-html="highlightSearchHtml(row.id)" />
+                  </div>
                 </div>
               </template>
             </ElTableColumn>
             <ElTableColumn label="源" min-width="160">
               <template #default="{ row }">
                 <div v-if="row.id" class="cell-two-line">
-                  <div class="cell-line cell-ellipsis">域：{{ row.srcZone }}</div>
+                  <div class="cell-line cell-ellipsis" v-html="highlightSearchHtml('域：' + row.srcZone)" />
                   <ElTooltip placement="top" :disabled="!row.srcIp?.length" popper-class="tag-stats-tooltip-popper">
                     <template #content>
                       <div class="hover-ip-list">
                         <div v-for="(line, idx) in srcIpHoverLines(row)" :key="idx" class="hover-ip-line">{{ line }}</div>
                       </div>
                     </template>
-                    <div class="cell-line cell-ellipsis">
-                      IP：{{ row.srcIp?.length ? row.srcIp.join('，') : '-' }}
-                    </div>
+                    <div
+                      class="cell-line cell-ellipsis"
+                      v-html="highlightSearchHtml(row.srcIp?.length ? 'IP：' + row.srcIp.join('，') : 'IP：-')"
+                    />
                   </ElTooltip>
                 </div>
               </template>
@@ -2363,16 +2713,17 @@ doSearch();
             <ElTableColumn label="目的" min-width="160">
               <template #default="{ row }">
                 <div v-if="row.id" class="cell-two-line">
-                  <div class="cell-line cell-ellipsis">域：{{ row.dstZone }}</div>
+                  <div class="cell-line cell-ellipsis" v-html="highlightSearchHtml('域：' + row.dstZone)" />
                   <ElTooltip placement="top" :disabled="!row.dstIp?.length" popper-class="tag-stats-tooltip-popper">
                     <template #content>
                       <div class="hover-ip-list">
                         <div v-for="(line, idx) in dstIpHoverLines(row)" :key="idx" class="hover-ip-line">{{ line }}</div>
                       </div>
                     </template>
-                    <div class="cell-line cell-ellipsis">
-                      IP：{{ row.dstIp?.length ? row.dstIp.join('，') : '-' }}
-                    </div>
+                    <div
+                      class="cell-line cell-ellipsis"
+                      v-html="highlightSearchHtml(row.dstIp?.length ? 'IP：' + row.dstIp.join('，') : 'IP：-')"
+                    />
                   </ElTooltip>
                 </div>
               </template>
@@ -2386,9 +2737,10 @@ doSearch();
                         <div v-for="(line, idx) in serviceHoverLines(row)" :key="idx" class="hover-ip-line">{{ line }}</div>
                       </div>
                     </template>
-                    <div class="cell-line cell-ellipsis service-text">
-                      {{ row.service?.length ? row.service.join('，') : '-' }}
-                    </div>
+                    <div
+                      class="cell-line cell-ellipsis service-text"
+                      v-html="highlightSearchHtml(row.service?.length ? row.service.join('，') : '-')"
+                    />
                   </ElTooltip>
                 </div>
               </template>
@@ -2396,7 +2748,7 @@ doSearch();
             <ElTableColumn label="动作" width="70">
               <template #default="{ row }">
                 <ElTag v-if="row.id" :type="row.action === 'allow' ? 'success' : 'danger'" size="small">
-                  {{ row.action === 'allow' ? '允许' : '拒绝' }}
+                  <span v-html="highlightSearchHtml(row.action === 'allow' ? '允许' : '拒绝')" />
                 </ElTag>
               </template>
             </ElTableColumn>
@@ -2411,7 +2763,8 @@ doSearch();
                     <span
                       class="optimize-text-link"
                       @click="openOptimizeDialog(row)"
-                    >{{ optimizeTagsDisplay(row).join('，') }}</span>
+                      v-html="highlightSearchHtml(optimizeTagsDisplay(row).join('，'))"
+                    />
                   </ElTooltip>
                   <span v-else class="optimize-text-empty"></span>
                 </div>
@@ -2421,15 +2774,15 @@ doSearch();
               <template #default="{ row }">
                 <div v-if="row.id" class="status-priority-cell">
                   <ElTag :type="row.enabled ? 'success' : 'danger'" size="small">{{ row.enabled ? '启用' : '停用' }}</ElTag>
-                  <span class="priority-val">{{ row.priority }}</span>
+                  <span class="priority-val" v-html="highlightSearchHtml(row.priority)" />
                 </div>
               </template>
             </ElTableColumn>
             <ElTableColumn label="设备信息" width="120">
               <template #default="{ row }">
                 <div v-if="row.id" class="cell-two-line">
-                  <div class="cell-line">{{ row.deviceName }}</div>
-                  <div class="cell-line">{{ row.deviceIp }}</div>
+                  <div class="cell-line" v-html="highlightSearchHtml(row.deviceName)" />
+                  <div class="cell-line" v-html="highlightSearchHtml(row.deviceIp ?? '')" />
                 </div>
               </template>
             </ElTableColumn>
@@ -2448,7 +2801,7 @@ doSearch();
                       <ElIcon class="nat-icon" @click.stop="openNatDialog(row, 'snat')"><WarningFilled /></ElIcon>
                     </ElTooltip>
                     <ElTooltip :content="row.snatSourceIps.join('，')">
-                      <span class="nat-cell-text">snat：{{ row.snatSourceIps.join('，') }}</span>
+                      <span class="nat-cell-text" v-html="highlightSearchHtml('snat：' + row.snatSourceIps.join('，'))" />
                     </ElTooltip>
                   </div>
                   <div v-if="row.dnatDest" class="nat-cell-line">
@@ -2459,7 +2812,7 @@ doSearch();
                       <ElIcon class="nat-icon" @click.stop="openNatDialog(row, 'dnat')"><WarningFilled /></ElIcon>
                     </ElTooltip>
                     <ElTooltip :content="row.dnatDest">
-                      <span class="nat-cell-text">dnat：{{ row.dnatDest }}</span>
+                      <span class="nat-cell-text" v-html="highlightSearchHtml('dnat：' + row.dnatDest)" />
                     </ElTooltip>
                   </div>
                 </div>
@@ -2470,7 +2823,7 @@ doSearch();
                 <div class="archive-cell">
                   <span class="archive-text-wrap">
                     <ElTooltip v-if="formatArchiveDisplay(row)" :content="formatArchiveDisplay(row)" placement="top">
-                      <span class="archive-text archive-text-two-line">{{ formatArchiveDisplay(row) }}</span>
+                      <span class="archive-text archive-text-two-line" v-html="highlightSearchHtml(formatArchiveDisplay(row))" />
                     </ElTooltip>
                     <span v-else class="archive-text archive-text-two-line">&nbsp;</span>
                   </span>
@@ -2482,7 +2835,7 @@ doSearch();
               <template #default="{ row }">
                 <div v-if="row.id" class="cell-two-line remark-cell">
                   <ElTooltip v-if="row.remark" :content="row.remark" placement="top">
-                    <span class="cell-line cell-ellipsis">{{ row.remark }}</span>
+                    <span class="cell-line cell-ellipsis" v-html="highlightSearchHtml(row.remark)" />
                   </ElTooltip>
                   <span v-else class="cell-line cell-ellipsis"></span>
                 </div>
@@ -2510,7 +2863,7 @@ doSearch();
             <ElPagination
               v-model:current-page="currentPage"
               v-model:page-size="pageSize"
-              :total="total"
+              :total="displayTotal"
               :page-sizes="[10, 20, 50, 100, 200]"
               layout="total, sizes, prev, pager, next"
               @current-change="onPageChange"
@@ -3181,7 +3534,7 @@ doSearch();
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 4px;
   min-height: 0;
   overflow: hidden;
 }
@@ -3190,6 +3543,442 @@ doSearch();
   border: 1px solid var(--el-border-color);
   border-radius: 8px;
   background: var(--el-fill-color-light);
+}
+.search-bar--engine {
+  --search-mode-switch-h: 28px;
+  --search-tab-active-bg: #e8f5f0;
+  --search-tab-active-color: #047857;
+  --search-tab-muted: #94a3b8;
+  --search-engine-h: 40px;
+}
+/* 检索条本体由输入框 + 右侧「更多」构成，避免与外层再套一层边框；左右无内边距以便与下方统计卡片外缘对齐 */
+.search-bar.search-bar--engine {
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+.search-mode-tabs-wrap {
+  display: inline-flex;
+  align-items: flex-start;
+  padding-bottom: 7px;
+}
+.search-mode-tabs-wrap--in-input {
+  align-items: center;
+  padding-bottom: 0;
+  padding-right: 10px;
+  margin-right: 2px;
+  border-right: 1px solid #e2e8f0;
+}
+.more-search-link__icon {
+  transform: rotate(90deg);
+  font-size: 16px;
+}
+.search-row.search-row--engine > :deep(.el-popover) {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.search-row.search-row--engine :deep(.el-tooltip__trigger) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  outline: none;
+}
+.more-search-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: var(--search-mode-switch-h);
+  min-height: var(--search-mode-switch-h);
+  padding: 0 10px;
+  box-sizing: border-box;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--el-color-primary);
+  font-size: 12px;
+  line-height: 1.35;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.more-search-link--icon-only {
+  width: auto;
+  height: auto;
+  min-height: unset;
+  min-width: unset;
+  padding: 2px;
+  gap: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--el-color-primary);
+  box-sizing: border-box;
+}
+.more-search-link--icon-only:hover {
+  background: var(--el-fill-color-light);
+}
+.more-search-link:hover:not(.more-search-link--icon-only) {
+  background: var(--el-color-primary-light-9);
+}
+.more-search-popover {
+  padding: 4px 0;
+}
+.more-search-popover__row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+.more-search-popover__row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.more-search-popover__label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--el-text-color-secondary);
+}
+.more-search-popover__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.more-search-pill {
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--el-border-color);
+  background: var(--el-fill-color-blank);
+  color: var(--el-text-color-regular);
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    background 0.15s,
+    color 0.15s;
+}
+.more-search-pill:hover {
+  border-color: var(--el-color-primary-light-5);
+  color: var(--el-color-primary);
+}
+.more-search-pill.is-active {
+  border-color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+  font-weight: 600;
+}
+.search-hit {
+  color: var(--el-color-success);
+  text-decoration: underline;
+  background: transparent !important;
+  font-weight: inherit;
+  padding: 0;
+}
+mark.search-hit {
+  background: transparent !important;
+}
+.search-mode-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+.search-mode-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  cursor: pointer;
+  padding: 4px 12px;
+  min-height: var(--search-mode-switch-h);
+  box-sizing: border-box;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--el-text-color-secondary);
+  background: transparent;
+  white-space: nowrap;
+  border-radius: 6px;
+  transition:
+    background 0.15s,
+    color 0.15s;
+}
+.search-mode-tab:not(.is-active)::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -6px;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 5px solid var(--el-border-color-lighter);
+  opacity: 0.5;
+  pointer-events: none;
+}
+.search-mode-tab:hover:not(.is-active) {
+  color: var(--el-color-primary);
+  background: var(--el-fill-color-light);
+}
+.search-mode-tab.is-active {
+  color: var(--el-color-primary);
+  font-weight: 600;
+  background: var(--el-color-primary-light-9);
+  box-shadow: none;
+}
+.search-mode-tab.is-active::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -6px;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-top: 6px solid var(--el-color-primary-light-9);
+  opacity: 1;
+  pointer-events: none;
+}
+/* 嵌入输入框内：参考图样式（薄荷绿选中、灰字未选、竖线分隔），去掉底部小三角 */
+.search-mode-tabs-wrap--in-input .search-mode-tab:not(.is-active)::after,
+.search-mode-tabs-wrap--in-input .search-mode-tab.is-active::after {
+  display: none;
+}
+.search-mode-tabs-wrap--in-input .search-mode-tab {
+  color: var(--search-tab-muted);
+  font-weight: 500;
+}
+.search-mode-tabs-wrap--in-input .search-mode-tab:hover:not(.is-active) {
+  color: #64748b;
+  background: transparent;
+}
+.search-mode-tabs-wrap--in-input .search-mode-tab.is-active {
+  color: var(--search-tab-active-color);
+  font-weight: 600;
+  background: var(--search-tab-active-bg);
+  box-shadow: none;
+}
+.search-normal-wrap,
+.search-advanced-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.search-row--engine {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.search-engine-more-spacer {
+  flex-shrink: 0;
+  width: 22px;
+  align-self: stretch;
+  min-height: var(--search-engine-h);
+  pointer-events: none;
+}
+.search-row.search-row--engine .search-input--engine {
+  flex: 1;
+  min-width: 0;
+}
+/* 普通检索 ElInput 与高级检索自定义外壳共用同一套「输入框」皮肤（对齐 large .el-input__wrapper） */
+.search-row.search-row--engine .search-input--engine :deep(.el-input__wrapper),
+.search-row.search-row--engine .search-input--engine.search-input--advanced {
+  border-radius: 8px;
+  box-shadow: 0 0 0 1px #e2e8f0 inset;
+  border: none;
+  background-color: #fff;
+}
+.search-row.search-row--engine .search-input--engine :deep(.el-input__wrapper) {
+  padding-left: 4px;
+  /* 与 40px 行高、32px 查询按钮对齐：上下各约 4px 留白，右侧与之一致 */
+  padding-right: 4px;
+  min-height: var(--search-engine-h);
+  height: var(--search-engine-h);
+  box-sizing: border-box;
+}
+.search-row.search-row--engine .search-input--engine :deep(.el-input__prefix) {
+  margin-right: 4px;
+}
+.search-row.search-row--engine .search-input--engine :deep(.el-input__prefix-inner) {
+  display: inline-flex;
+  align-items: center;
+}
+.search-row.search-row--engine .search-input--engine.search-input--advanced {
+  padding: 1px 4px 1px 4px;
+  display: flex;
+  align-items: center;
+  min-height: var(--search-engine-h);
+  width: 100%;
+  background: #fff;
+  box-sizing: border-box;
+  transition: box-shadow 0.2s;
+}
+.search-row.search-row--engine .search-submit-btn.el-button--primary {
+  min-width: 36px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: none;
+  margin-left: 0;
+}
+.search-row.search-row--engine .search-submit-btn.el-button--primary :deep(.el-icon) {
+  font-size: 16px;
+}
+.search-input--advanced > .search-mode-tabs-wrap--in-input {
+  flex-shrink: 0;
+}
+.search-row.search-row--engine .search-input--engine :deep(.el-input__wrapper.is-focus) {
+  box-shadow: 0 0 0 1px var(--el-color-primary) inset;
+}
+.search-row.search-row--engine .search-input--engine.search-input--advanced:focus-within {
+  box-shadow: 0 0 0 1px var(--el-color-primary) inset;
+}
+.search-suffix--compact {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  padding-right: 0;
+}
+.search-suffix-end {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.search-toolbar-normal,
+.search-toolbar-advanced {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 4px 2px;
+}
+.match-mode-icons {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.match-mode-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 10px;
+  background: var(--el-fill-color-blank);
+  color: var(--el-text-color-regular);
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    background 0.15s,
+    color 0.15s;
+}
+.match-mode-btn:hover {
+  border-color: var(--el-color-primary-light-5);
+  color: var(--el-color-primary);
+}
+.match-mode-btn.is-active {
+  border-color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+}
+.match-mode-tip__title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.match-mode-tip__desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--el-text-color-secondary);
+  max-width: 280px;
+}
+.any-toggle-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.any-pill {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--el-border-color);
+  background: var(--el-fill-color-blank);
+  color: var(--el-text-color-regular);
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    background 0.15s,
+    color 0.15s;
+}
+.any-pill:hover {
+  border-color: var(--el-color-primary-light-5);
+  color: var(--el-color-primary);
+}
+.any-pill.is-active {
+  border-color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+}
+.field-stats-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--el-fill-color-light);
+  border: 1px dashed var(--el-border-color-lighter);
+}
+.field-stats-label {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  flex-shrink: 0;
+}
+.field-stats-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.field-stat-chip {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: var(--el-color-info-light-9);
+  color: var(--el-text-color-primary);
+  cursor: pointer;
+  font-family: inherit;
+  transition:
+    border-color 0.15s,
+    background 0.15s;
+}
+.field-stat-chip:hover {
+  border-color: var(--el-color-primary-light-5);
+}
+.field-stat-chip.is-active {
+  border-color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+}
+.field-stat-num {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--el-color-primary);
+  margin-left: 2px;
 }
 .search-row {
   display: flex;
@@ -3208,8 +3997,32 @@ doSearch();
   font-size: 16px;
   margin: 0 4px;
 }
+.search-row.search-row--engine .search-suffix--compact .search-icon {
+  margin: 0;
+  color: var(--el-input-icon-color, var(--el-text-color-placeholder));
+}
 .search-icon:hover {
   color: var(--el-color-primary);
+}
+.search-reset-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 4px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--el-input-icon-color, var(--el-text-color-placeholder));
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.15s;
+}
+.search-reset-btn:hover {
+  background: transparent;
+  color: var(--el-color-primary);
+}
+.search-reset-btn__icon {
+  font-size: 16px;
 }
 .search-suffix {
   display: inline-flex;
@@ -3262,7 +4075,7 @@ doSearch();
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  margin-top: 8px;
+  margin-top: 4px;
 }
 .common-label {
   font-size: 12px;
@@ -3273,23 +4086,7 @@ doSearch();
   border-color: var(--el-color-primary-light-7);
   cursor: pointer;
 }
-/* 高级模式：单输入框内联标签 + 构建 */
-.search-input--advanced {
-  display: flex;
-  align-items: stretch;
-  min-height: 40px;
-  padding: 0 12px;
-  border: 1px solid var(--el-border-color);
-  border-radius: 8px;
-  background: var(--el-bg-color);
-  box-sizing: border-box;
-}
-.search-input--advanced .search-input__prefix {
-  display: inline-flex;
-  align-items: center;
-  padding-right: 8px;
-  color: var(--el-text-color-placeholder);
-}
+/* 高级模式：外层皮肤已随 .search-input--engine 与普通过检共用；以下仅保留内部布局 */
 .search-input--advanced .search-input__inner {
   flex: 1;
   min-width: 0;
@@ -3297,16 +4094,14 @@ doSearch();
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 6px 0;
+  padding: 3px 0;
 }
 .search-input--advanced .search-input__inner--advanced {
   align-content: center;
 }
-.search-input--advanced .search-input__suffix {
-  display: inline-flex;
-  align-items: center;
-  padding-left: 8px;
-  border-left: 1px solid var(--el-border-color-lighter);
+.search-input--advanced .search-input__suffix.search-suffix {
+  margin-left: auto;
+  flex-shrink: 0;
 }
 .adv-inline-condition {
   display: inline-flex;
@@ -3390,6 +4185,25 @@ doSearch();
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 4px;
   box-shadow: var(--el-box-shadow-light);
+}
+.adv-inline-suggestions:has(.adv-field-panel-search) {
+  min-width: 220px;
+  max-height: 280px;
+}
+.adv-field-panel-search {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  background: var(--el-bg-color);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.adv-inline-option--empty {
+  color: var(--el-text-color-placeholder);
+  cursor: default;
+}
+.adv-inline-option--empty:hover {
+  background: transparent;
 }
 .adv-inline-option {
   display: block;
@@ -3509,9 +4323,13 @@ doSearch();
   flex-direction: column;
   gap: 16px;
 }
-.tag-setting-title {
-  font-weight: 600;
+.tag-setting-category-master {
+  display: flex;
   margin-bottom: 8px;
+  font-weight: 600;
+}
+.tag-setting-group :deep(.el-checkbox-group) {
+  margin-left: 24px;
 }
 .table-toolbar {
   display: flex;
@@ -3635,62 +4453,8 @@ doSearch();
 .table-toolbar {
   flex-shrink: 0;
 }
-.policy-table-container {
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-}
-/* 表格内部横向滚动条：在固定列时有横向溢出时，始终显示横向滚动条，不依赖行数 */
-.policy-table-container :deep(.el-scrollbar__wrap) {
-  overflow-x: scroll;
-}
-.table-pagination {
-  flex-shrink: 0;
-  padding: 12px 0 0;
-  justify-content: flex-end;
-  display: flex;
-}
-.tags-text {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  word-break: break-all;
-}
-.table-wrap :deep(.el-table .el-table__cell.op-column .cell) {
-  padding-left: 12px;
-  padding-right: 12px;
-}
-/* 固定列左右边距一致，覆盖 Element Plus 默认样式 */
-.table-wrap :deep(.el-table__cell.op-column.el-table-fixed-column--right .cell) {
-  padding-left: 12px !important;
-  padding-right: 12px !important;
-}
-.op-cell {
-  display: inline-flex;
-  align-items: center;
-  flex-wrap: nowrap;
-  gap: 0 4px;
-}
-.op-cell .el-button + .el-button {
-  margin-left: 0;
-}
 .op-more-btn .el-icon--right {
   margin-left: 4px;
-}
-.cell-two-line {
-  font-size: 12px;
-  line-height: 1.35;
-  max-height: 2.7em;
-  overflow: hidden;
-}
-.cell-line {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.cell-ellipsis {
-  max-width: 100%;
 }
 .hover-ip-list {
   text-align: left;
@@ -3997,13 +4761,6 @@ doSearch();
   align-items: center;
   gap: 6px;
   white-space: nowrap;
-}
-/* 表头不换行、最小宽度 */
-.table-wrap :deep(.el-table .el-table__header th .cell) {
-  white-space: nowrap;
-}
-.table-wrap :deep(.el-table .el-table__header th) {
-  min-width: 0;
 }
 .context-menu-mask {
   position: fixed;
