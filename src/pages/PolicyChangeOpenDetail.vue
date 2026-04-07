@@ -18,7 +18,7 @@ import PolicyChangeHeaderActions from '@/components/PolicyChangeHeaderActions.vu
 
     <PageContent>
       <section class="policy-page__placeholder">
-        <ElResult title="策略编辑" sub-title="此页面内容由你后续补充。" />
+        <ElResult title="策略开通明细" sub-title="此页面内容由你后续补充。" />
       </section>
     </PageContent>
   </section>
@@ -41,4 +41,3 @@ import PolicyChangeHeaderActions from '@/components/PolicyChangeHeaderActions.vu
   border-radius: 16px;
 }
 </style>
-

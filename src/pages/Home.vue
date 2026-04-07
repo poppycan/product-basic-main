@@ -9,7 +9,6 @@ import {
   EditPen,
     CircleCheck,
     Connection,
-    DocumentAdd,
     Files,
 } from '@element-plus/icons-vue';
 import { useI18n } from 'vue-i18n';

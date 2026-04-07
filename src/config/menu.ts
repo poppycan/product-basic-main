@@ -274,6 +274,15 @@ export const POLICY_CHANGE_SUB_ITEMS: SideNavItem[] = [
     },
   },
   {
+    id: 'policy-open-detail',
+    path: '/policy-change/open-detail',
+    iconSrc: resolveMenuIcon('报表@2x.png'),
+    title: {
+      zh: '策略开通明细',
+      en: 'Policy Open Detail',
+    },
+  },
+  {
     id: 'policy-modify',
     path: '/policy-change/modify',
     iconSrc: resolveMenuIcon('报表@2x.png'),

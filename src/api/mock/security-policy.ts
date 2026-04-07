@@ -281,6 +281,90 @@ export const mockBusinessTagList: BusinessTagItem[] = [
   { id: 'tag-4', name: '临时策略', createdAt: '2026-02-01 14:00', createdBy: '王五' },
 ];
 
+function normalizeMatchMode(m: SearchParams['matchMode'] | string | undefined): SearchParams['matchMode'] {
+  if (m === 'all') return 'partial';
+  if (m === 'include') return 'fullInclude';
+  if (m === 'fullInclude' || m === 'exclude' || m === 'equal' || m === 'partial') return m;
+  return 'partial';
+}
+
+export function tokenizeQuery(raw: string): string[] {
+  return raw
+    .trim()
+    .split(/[\s,，]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/** 策略行可检索全文（普通检索） */
+function rowSearchBlob(p: PolicyRow): string {
+  const parts: string[] = [
+    p.name,
+    p.id,
+    p.deviceName,
+    p.deviceIp ?? '',
+    String(p.priority),
+    p.action,
+    p.srcZone,
+    p.dstZone,
+    ...(p.srcIp ?? []),
+    ...(p.dstIp ?? []),
+    ...(p.service ?? []),
+    ...(p.snatSourceIps ?? []),
+    p.dnatDest ?? '',
+    ...(p.lines ?? []),
+    ...(p.tags ?? []),
+    p.archive ?? '',
+    p.remark ?? '',
+    ...(p.snatRules ?? []).map((r) => `${r.fromIp} ${r.toIp} ${r.ruleName}`),
+    ...(p.dnatRules ?? []).map((r) => `${r.fromIp} ${r.toIp} ${r.ruleName}`),
+  ];
+  return parts.join(' ').toLowerCase();
+}
+
+function tokenMatchesRow(token: string, p: PolicyRow): boolean {
+  const t = token.toLowerCase();
+  if (!t) return true;
+  return rowSearchBlob(p).includes(t);
+}
+
+function rowMatchesNormalQuery(p: PolicyRow, raw: string, matchMode: SearchParams['matchMode']): boolean {
+  const mode = normalizeMatchMode(matchMode);
+  const q = raw.trim();
+  if (!q) return true;
+  const tokens = tokenizeQuery(q);
+  if (!tokens.length) return true;
+
+  if (mode === 'equal') {
+    const ql = q.toLowerCase();
+    return p.name.toLowerCase() === ql || p.id.toLowerCase() === ql;
+  }
+
+  if (mode === 'exclude') {
+    return !tokens.some((tok) => tokenMatchesRow(tok, p));
+  }
+
+  if (mode === 'fullInclude') {
+    return tokens.every((tok) => tokenMatchesRow(tok, p));
+  }
+
+  // partial：任意一个 token 命中即可
+  return tokens.some((tok) => tokenMatchesRow(tok, p));
+}
+
+/** 高级检索：保留原逻辑（名称 / ID / 区域子串） */
+function advancedFilterRow(p: PolicyRow, qLower: string, matchMode: SearchParams['matchMode']): boolean {
+  const mode = normalizeMatchMode(matchMode);
+  const name = p.name.toLowerCase();
+  const id = p.id.toLowerCase();
+  const combined = `${name} ${id} ${p.srcZone} ${p.dstZone}`.toLowerCase();
+  if (mode === 'equal') return name === qLower || id === qLower;
+  if (mode === 'exclude') return !combined.includes(qLower);
+  if (mode === 'partial') return name.includes(qLower) || id.includes(qLower);
+  if (mode === 'fullInclude') return combined.includes(qLower);
+  return combined.includes(qLower);
+}
+
 function filterPolicies(list: PolicyRow[], params: SearchParams): PolicyRow[] {
   let result = [...list];
 
@@ -288,20 +372,20 @@ function filterPolicies(list: PolicyRow[], params: SearchParams): PolicyRow[] {
     result = result.filter((p) => params.deviceIds!.includes(p.deviceId));
   }
 
-  const q = (params.queryText || params.policyNameOrId || '').trim().toLowerCase();
-  if (q) {
-    const matchMode = params.matchMode || 'all';
-    result = result.filter((p) => {
-      const name = p.name.toLowerCase();
-      const id = p.id.toLowerCase();
-      const combined = `${name} ${id} ${p.srcZone} ${p.dstZone}`.toLowerCase();
-      if (matchMode === 'all') return combined.includes(q);
-      if (matchMode === 'include') return combined.includes(q);
-      if (matchMode === 'exclude') return !combined.includes(q);
-      if (matchMode === 'equal') return name === q || id === q;
-      if (matchMode === 'partial') return name.includes(q) || id.includes(q);
-      return true;
-    });
+  const matchMode = normalizeMatchMode(params.matchMode);
+
+  if (params.searchMode === 'normal' && params.normalQueryText?.trim()) {
+    result = result.filter((p) => rowMatchesNormalQuery(p, params.normalQueryText!.trim(), matchMode));
+  } else if (params.searchMode === 'advanced' && params.queryText?.trim()) {
+    const q = params.queryText.trim().toLowerCase();
+    result = result.filter((p) => advancedFilterRow(p, q, matchMode));
+  } else if (params.queryText?.trim() && params.searchMode !== 'normal') {
+    const q = params.queryText.trim().toLowerCase();
+    result = result.filter((p) => advancedFilterRow(p, q, matchMode));
+  } else if (params.normalQueryText?.trim()) {
+    result = result.filter((p) => rowMatchesNormalQuery(p, params.normalQueryText!.trim(), matchMode));
+  } else if (params.policyNameOrId?.trim()) {
+    result = result.filter((p) => rowMatchesNormalQuery(p, params.policyNameOrId!.trim(), matchMode));
   }
 
   if (params.anyMode === 'include') {
@@ -323,6 +407,134 @@ function filterPolicies(list: PolicyRow[], params: SearchParams): PolicyRow[] {
   }
 
   return result;
+}
+
+const IPv4_CHUNK = /\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/;
+
+function ipInField(ip: string, hay: string): boolean {
+  if (!ip || !hay) return false;
+  return hay.toLowerCase().includes(ip.toLowerCase());
+}
+
+/** 普通检索：输入联想统计（按字段命中条数，仅非空字段参与） */
+export function computeNormalFieldStats(rows: PolicyRow[], query: string): { label: string; count: number }[] {
+  const q = query.trim();
+  if (!q) return [];
+
+  const looksLikeIp = IPv4_CHUNK.test(q);
+  const stats: Array<{ label: string; count: number }> = [];
+
+  if (looksLikeIp) {
+    const ip = q.match(IPv4_CHUNK)?.[0] ?? q;
+    let src = 0;
+    let dst = 0;
+    let snat = 0;
+    let dnat = 0;
+    for (const p of rows) {
+      const srcHit = (p.srcIp ?? []).some((x) => ipInField(ip, x));
+      const dstHit = (p.dstIp ?? []).some((x) => ipInField(ip, x));
+      const snatHit =
+        (p.snatSourceIps?.length ?? 0) > 0 || (p.snatRules?.length ?? 0) > 0
+          ? ipInField(ip, (p.snatSourceIps ?? []).join(' ')) ||
+            (p.snatRules ?? []).some((r) => ipInField(ip, `${r.fromIp} ${r.toIp}`))
+          : false;
+      const dnatHit =
+        (p.dnatRules?.length ?? 0) > 0 || (p.dnatDest && p.dnatDest.length > 0)
+          ? ipInField(ip, p.dnatDest ?? '') || (p.dnatRules ?? []).some((r) => ipInField(ip, `${r.fromIp} ${r.toIp}`))
+          : false;
+      if (srcHit) src++;
+      if (dstHit) dst++;
+      if (snatHit) snat++;
+      if (dnatHit) dnat++;
+    }
+    if (src) stats.push({ label: '源IP', count: src });
+    if (dst) stats.push({ label: '目的IP', count: dst });
+    if (snat) stats.push({ label: 'SNAT', count: snat });
+    if (dnat) stats.push({ label: 'DNAT', count: dnat });
+    return stats;
+  }
+
+  const qLower = q.toLowerCase();
+  const add = (label: string, fn: (p: PolicyRow) => string) => {
+    let c = 0;
+    for (const p of rows) {
+      const s = fn(p);
+      if (!s || String(s).trim() === '') continue;
+      if (String(s).toLowerCase().includes(qLower)) c++;
+    }
+    if (c) stats.push({ label, count: c });
+  };
+
+  add('策略名称', (p) => p.name);
+  add('策略ID', (p) => p.id);
+  add('设备名', (p) => p.deviceName);
+  add('设备IP', (p) => p.deviceIp ?? '');
+  add('优先级', (p) => String(p.priority));
+  add('动作', (p) => p.action);
+  add('源区域', (p) => p.srcZone);
+  add('目的区域', (p) => p.dstZone);
+  add('源IP', (p) => (p.srcIp ?? []).join(' '));
+  add('目的IP', (p) => (p.dstIp ?? []).join(' '));
+  add('端口/服务', (p) => (p.service ?? []).join(' '));
+  add('专线', (p) => (p.lines ?? []).join(' '));
+  add('标签', (p) => (p.tags ?? []).join(' '));
+  add('档案', (p) => p.archive ?? '');
+  add('备注', (p) => p.remark ?? '');
+
+  return stats.sort((a, b) => b.count - a.count);
+}
+
+/** 判断某行在指定「条件分布」字段上是否命中当前检索词（用于点击分布标签过滤列表） */
+export function policyRowMatchesFieldLabel(row: PolicyRow, label: string, query: string): boolean {
+  const q = query.trim();
+  if (!q) return true;
+
+  const looksLikeIp = IPv4_CHUNK.test(q);
+  const ip = q.match(IPv4_CHUNK)?.[0] ?? q;
+
+  if (looksLikeIp) {
+    if (label === '源IP') return (row.srcIp ?? []).some((x) => ipInField(ip, x));
+    if (label === '目的IP') return (row.dstIp ?? []).some((x) => ipInField(ip, x));
+    if (label === 'SNAT') {
+      if (!((row.snatSourceIps?.length ?? 0) > 0 || (row.snatRules?.length ?? 0) > 0)) return false;
+      return (
+        ipInField(ip, (row.snatSourceIps ?? []).join(' ')) ||
+        (row.snatRules ?? []).some((r) => ipInField(ip, `${r.fromIp} ${r.toIp}`))
+      );
+    }
+    if (label === 'DNAT') {
+      if (!((row.dnatRules?.length ?? 0) > 0 || (row.dnatDest && row.dnatDest.length > 0))) return false;
+      return (
+        ipInField(ip, row.dnatDest ?? '') ||
+        (row.dnatRules ?? []).some((r) => ipInField(ip, `${r.fromIp} ${r.toIp}`))
+      );
+    }
+    return false;
+  }
+
+  const qLower = q.toLowerCase();
+  const map: Record<string, (p: PolicyRow) => string> = {
+    策略名称: (p) => p.name,
+    策略ID: (p) => p.id,
+    设备名: (p) => p.deviceName,
+    设备IP: (p) => p.deviceIp ?? '',
+    优先级: (p) => String(p.priority),
+    动作: (p) => p.action,
+    源区域: (p) => p.srcZone,
+    目的区域: (p) => p.dstZone,
+    源IP: (p) => (p.srcIp ?? []).join(' '),
+    目的IP: (p) => (p.dstIp ?? []).join(' '),
+    '端口/服务': (p) => (p.service ?? []).join(' '),
+    专线: (p) => (p.lines ?? []).join(' '),
+    标签: (p) => (p.tags ?? []).join(' '),
+    档案: (p) => p.archive ?? '',
+    备注: (p) => p.remark ?? '',
+  };
+  const fn = map[label];
+  if (!fn) return false;
+  const s = fn(row);
+  if (!s || String(s).trim() === '') return false;
+  return String(s).toLowerCase().includes(qLower);
 }
 
 /** 模拟搜索接口 */

@@ -1,12 +1,16 @@
 <script setup lang="ts">
 import PageHeader from '@/components/PageHeader.vue';
 import PageContent from '@/components/PageContent.vue';
+import PolicyChangeHeaderBreadcrumb from '@/components/PolicyChangeHeaderBreadcrumb.vue';
 import PolicyChangeHeaderActions from '@/components/PolicyChangeHeaderActions.vue';
 </script>
 
 <template>
   <section class="policy-page">
-    <PageHeader title="策略回收" variant="simple">
+    <PageHeader variant="simple">
+      <template #breadcrumb>
+        <PolicyChangeHeaderBreadcrumb />
+      </template>
       <template #actions>
         <PolicyChangeHeaderActions />
       </template>

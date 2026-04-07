@@ -15,7 +15,6 @@ import {
   ElTableColumn,
   ElTag,
   ElTooltip,
-  ElTree,
   ElMessage,
   ElMessageBox,
   ElPopover,
@@ -36,14 +35,20 @@ import {
   Close,
   Setting,
   Plus,
-  CirclePlus,
   InfoFilled,
   Link,
   Edit,
+  Top,
+  Bottom,
+  View,
+  Hide,
+  DArrowLeft,
+  DArrowRight,
+  Rank,
 } from '@element-plus/icons-vue';
 import PageContent from '@/components/PageContent.vue';
+import SecurityPolicyDeviceTree from '@/components/SecurityPolicyDeviceTree.vue';
 import {
-  mockDeviceTree,
   mockTagStats,
   mockBusinessTagList,
   mockPolicies,
@@ -54,8 +59,6 @@ import {
 } from '@/api/mock/security-policy';
 import type { BusinessTagItem } from '@/api/mock/security-policy';
 import type {
-  DeviceGroup,
-  FirewallDevice,
   NatRule,
   PolicyRow,
   SearchParams,
@@ -66,129 +69,8 @@ import type {
 const STORAGE_KEY = 'securityPolicy.commonSearches';
 const MAX_COMMON = 5;
 
-// ---------- 左侧树 ----------
-const deviceKeyword = ref('');
-const deviceCount = computed(() => mockDeviceTree.reduce((sum, g) => sum + (g.children?.length ?? 0), 0));
-
-const baseTreeData = computed(() =>
-  mockDeviceTree.map((g: DeviceGroup) => ({
-    id: g.id,
-    label: g.name,
-    isGroup: true,
-    children: g.children.map((d: FirewallDevice) => ({
-      id: d.id,
-      label: d.name,
-      isGroup: false,
-      device: d,
-    })),
-  }))
-);
-
-const treeData = computed(() => {
-  const kw = deviceKeyword.value.trim().toLowerCase();
-  if (!kw) return baseTreeData.value;
-  return baseTreeData.value
-    .map((g) => {
-      const children = (g.children ?? []).filter((c) => {
-        const name = c.device?.name?.toLowerCase?.() ?? '';
-        const ip = c.device?.ip?.toLowerCase?.() ?? '';
-        return name.includes(kw) || ip.includes(kw);
-      });
-      return { ...g, children };
-    })
-    .filter((g) => (g.children?.length ?? 0) > 0);
-});
-
+// ---------- 左侧设备树（组件：SecurityPolicyDeviceTree） ----------
 const selectedDeviceIds = ref<string[]>([]);
-
-const defaultProps = { children: 'children', label: 'label' };
-const getNodeIcon = (data: { isGroup?: boolean; device?: FirewallDevice }) => {
-  if (data.isGroup) return null;
-  return data.device?.enabled ? '🟢' : '🔴';
-};
-
-const handleTreeCheck = (_data: unknown, checkedInfo: { checkedNodes?: any[] }) => {
-  const nodes = checkedInfo?.checkedNodes ?? [];
-  const ids = new Set<string>();
-  for (const n of nodes) {
-    if (n?.isGroup) {
-      for (const c of n?.children ?? []) {
-        if (c?.id && !c?.isGroup) ids.add(String(c.id));
-      }
-    } else if (n?.id) {
-      ids.add(String(n.id));
-    }
-  }
-  selectedDeviceIds.value = Array.from(ids);
-};
-
-// 右键菜单
-const contextMenuVisible = ref(false);
-const contextMenuPosition = ref({ x: 0, y: 0 });
-const contextMenuDevice = ref<FirewallDevice | null>(null);
-
-const onTreeContextMenu = (evt: Event, data: { isGroup?: boolean; device?: FirewallDevice }) => {
-  if (data?.isGroup) return;
-  evt.preventDefault();
-  const e = evt as MouseEvent;
-  contextMenuDevice.value = data?.device ?? null;
-  contextMenuPosition.value = { x: e.clientX, y: e.clientY };
-  contextMenuVisible.value = true;
-};
-
-const closeContextMenu = () => {
-  contextMenuVisible.value = false;
-  contextMenuDevice.value = null;
-};
-
-const handleDeviceManage = () => {
-  ElMessage.info('设备管理（URL 占位）');
-  closeContextMenu();
-};
-const handleDeviceDetail = () => {
-  ElMessage.info('设备详情弹窗（占位）');
-  closeContextMenu();
-};
-const handleConfigUpdate = () => {
-  ElMessage.info('配置更新弹窗（占位）');
-  closeContextMenu();
-};
-const handleConfigDownload = () => {
-  ElMessage.success('配置下载（占位）');
-  closeContextMenu();
-};
-
-function downloadDeviceConfig(device: FirewallDevice) {
-  const blob = new Blob([`device=${device.name}\nip=${device.ip ?? '-'}\nconfig=placeholder\n`], {
-    type: 'text/plain;charset=utf-8',
-  });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `${device.name}-config.txt`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-const devicePropsVisible = ref(false);
-const devicePropsDevice = ref<FirewallDevice | null>(null);
-function openDeviceProps(device: FirewallDevice) {
-  devicePropsDevice.value = device;
-  devicePropsVisible.value = true;
-  closeContextMenu();
-}
-const handleDeviceDelete = () => {
-  ElMessageBox.confirm('确定删除选中设备？', '提示', {
-    confirmButtonText: '确定',
-    cancelButtonText: '取消',
-    type: 'warning',
-  })
-    .then(() => {
-      ElMessage.success('已删除（占位）');
-      closeContextMenu();
-    })
-    .catch(() => closeContextMenu());
-};
 
 // ---------- 检索（精简大气：单输入框 + 图标） ----------
 type AdvancedValueType = 'ip' | 'port' | 'protocol' | 'action' | 'text' | 'number';
@@ -1461,6 +1343,12 @@ function onSelectionChange(rows: PolicyRow[]) {
 const batchCommandVisible = ref(false);
 
 // ---------- 列设置 ----------
+/** 多字段列的子字段（与主列表单元格内块一一对应） */
+interface ColumnFieldDef {
+  key: string;
+  label: string;
+  visible: boolean;
+}
 interface ColumnDef {
   key: string;
   label: string;
@@ -1468,6 +1356,8 @@ interface ColumnDef {
   fixed: 'left' | 'right' | false | '';
   order: number;
   checked?: boolean;
+  /** 多字段列：仅当 >1 列时展示子字段开关；单字段列不写或仅 1 项 */
+  fields?: ColumnFieldDef[];
 }
 interface ColumnTemplate {
   id: string;
@@ -1475,23 +1365,92 @@ interface ColumnTemplate {
   columns: ColumnDef[];
 }
 const COLUMN_STORAGE_KEY = 'securityPolicy.columnTemplates';
+/** 选中「默认列表」时点击「保存」写入，用于刷新后恢复用户对默认列表的修改 */
+const COLUMN_DEFAULT_OVERRIDE_KEY = 'securityPolicy.columnDefaultOverride';
+
+const DEFAULT_COLUMN_FIELDS: Record<string, ColumnFieldDef[]> = {
+  policyInfo: [
+    { key: 'name', label: '策略名称', visible: true },
+    { key: 'id', label: '策略ID', visible: true },
+  ],
+  src: [
+    { key: 'zone', label: '域', visible: true },
+    { key: 'ip', label: 'IP', visible: true },
+  ],
+  dst: [
+    { key: 'zone', label: '域', visible: true },
+    { key: 'ip', label: 'IP', visible: true },
+  ],
+  statusPriority: [
+    { key: 'status', label: '状态', visible: true },
+    { key: 'priority', label: '优先级', visible: true },
+  ],
+  deviceInfo: [
+    { key: 'name', label: '设备名称', visible: true },
+    { key: 'ip', label: '设备IP', visible: true },
+  ],
+  natInfo: [
+    { key: 'snat', label: 'SNAT', visible: true },
+    { key: 'dnat', label: 'DNAT', visible: true },
+  ],
+  archive: [
+    { key: 'content', label: '档案内容', visible: true },
+    { key: 'edit', label: '编辑', visible: true },
+  ],
+};
+
+function cloneFieldsForKey(key: string): ColumnFieldDef[] | undefined {
+  const defs = DEFAULT_COLUMN_FIELDS[key];
+  return defs ? defs.map((f) => ({ ...f })) : undefined;
+}
 
 const defaultColumnDefs: ColumnDef[] = [
-  { key: 'deviceInfo', label: '设备信息', visible: true, fixed: false, order: 0 },
-  { key: 'policyInfo', label: '策略信息', visible: true, fixed: false, order: 1 },
-  { key: 'src', label: '源', visible: true, fixed: false, order: 2 },
-  { key: 'dst', label: '目的', visible: true, fixed: false, order: 3 },
-  { key: 'service', label: '服务', visible: true, fixed: false, order: 4 },
-  { key: 'action', label: '动作', visible: true, fixed: false, order: 5 },
-  { key: 'optimizeType', label: '优化类型', visible: true, fixed: false, order: 6 },
-  { key: 'statusPriority', label: '状态/优先级', visible: true, fixed: false, order: 7 },
-  { key: 'natInfo', label: 'NAT信息', visible: true, fixed: false, order: 8 },
-  { key: 'archive', label: '档案', visible: true, fixed: false, order: 9 },
+  { key: 'policyInfo', label: '策略信息', visible: true, fixed: false, order: 0, fields: cloneFieldsForKey('policyInfo') },
+  { key: 'src', label: '源', visible: true, fixed: false, order: 1, fields: cloneFieldsForKey('src') },
+  { key: 'dst', label: '目的', visible: true, fixed: false, order: 2, fields: cloneFieldsForKey('dst') },
+  { key: 'service', label: '服务', visible: true, fixed: false, order: 3 },
+  { key: 'action', label: '动作', visible: true, fixed: false, order: 4 },
+  { key: 'optimizeType', label: '优化类型', visible: true, fixed: false, order: 5 },
+  { key: 'statusPriority', label: '状态/优先级', visible: true, fixed: false, order: 6, fields: cloneFieldsForKey('statusPriority') },
+  { key: 'deviceInfo', label: '设备信息', visible: true, fixed: false, order: 7, fields: cloneFieldsForKey('deviceInfo') },
+  { key: 'natInfo', label: 'NAT信息', visible: true, fixed: false, order: 8, fields: cloneFieldsForKey('natInfo') },
+  { key: 'archive', label: '档案', visible: true, fixed: false, order: 9, fields: cloneFieldsForKey('archive') },
   { key: 'remark', label: '策略备注', visible: true, fixed: false, order: 10 },
+  { key: 'operation', label: '操作', visible: true, fixed: 'right', order: 11 },
 ];
 
 function deepCloneCols(cols: ColumnDef[]): ColumnDef[] {
-  return cols.map((c) => ({ ...c, checked: false }));
+  return cols.map((c) => ({
+    ...c,
+    checked: false,
+    fields: c.fields ? c.fields.map((f) => ({ ...f })) : undefined,
+  }));
+}
+
+function mergeColumnDefsWithDefaults(incoming: ColumnDef[]): ColumnDef[] {
+  const defaults = deepCloneCols(defaultColumnDefs);
+  const incomingMap = new Map(incoming.map((c) => [c.key, c]));
+  return defaults.map((d) => {
+    const inc = incomingMap.get(d.key);
+    if (!inc) return d;
+    const merged: ColumnDef = {
+      ...d,
+      visible: inc.visible,
+      fixed: inc.fixed,
+      order: inc.order,
+      checked: false,
+    };
+    if (d.fields?.length && inc.fields?.length) {
+      const fMap = new Map(inc.fields.map((f) => [f.key, f]));
+      merged.fields = d.fields.map((bf) => {
+        const mf = fMap.get(bf.key);
+        return mf ? { ...bf, visible: mf.visible } : { ...bf };
+      });
+    } else if (d.fields) {
+      merged.fields = d.fields.map((f) => ({ ...f }));
+    }
+    return merged;
+  });
 }
 
 const columnSettingVisible = ref(false);
@@ -1499,7 +1458,7 @@ const columnSettingKeyword = ref('');
 const columnSettingTemplate = ref('default');
 const columnDefs = ref<ColumnDef[]>(deepCloneCols(defaultColumnDefs));
 
-const defaultTemplate: ColumnTemplate = { id: 'default', name: '默认列表', columns: defaultColumnDefs };
+const defaultTemplate: ColumnTemplate = { id: 'default', name: '默认列表', columns: deepCloneCols(defaultColumnDefs) };
 const columnTemplates = ref<ColumnTemplate[]>([defaultTemplate]);
 
 try {
@@ -1514,13 +1473,72 @@ try {
   /* ignore */
 }
 
+try {
+  const defOverride = localStorage.getItem(COLUMN_DEFAULT_OVERRIDE_KEY);
+  if (defOverride) {
+    const parsed = JSON.parse(defOverride) as ColumnDef[];
+    if (Array.isArray(parsed) && parsed.length) {
+      columnDefs.value = mergeColumnDefsWithDefaults(parsed);
+    }
+  }
+} catch {
+  /* ignore */
+}
+
 const filteredColumnDefs = computed(() => {
   const kw = columnSettingKeyword.value.trim().toLowerCase();
-  if (!kw) return [...columnDefs.value].sort((a, b) => a.order - b.order);
-  return [...columnDefs.value]
-    .filter((c) => c.label.toLowerCase().includes(kw))
-    .sort((a, b) => a.order - b.order);
+  const list = [...columnDefs.value].sort((a, b) => a.order - b.order);
+  if (!kw) return list;
+  return list.filter((c) => {
+    if (c.label.toLowerCase().includes(kw)) return true;
+    return c.fields?.some((f) => f.label.toLowerCase().includes(kw)) ?? false;
+  });
 });
+
+/** 主列表列渲染顺序（与列设置 order 一致） */
+const sortedColumnDefsForRender = computed(() =>
+  columnDefs.value.filter((c) => c.visible).sort((a, b) => a.order - b.order)
+);
+
+function columnFixedProp(col: ColumnDef): 'left' | 'right' | undefined {
+  if (col.fixed === 'left') return 'left';
+  if (col.fixed === 'right') return 'right';
+  return undefined;
+}
+
+function isMultiFieldColumnDef(col: ColumnDef): boolean {
+  return !!(col.fields && col.fields.length > 1);
+}
+
+function isFieldVisible(colKey: string, fieldKey: string): boolean {
+  const col = columnDefs.value.find((c) => c.key === colKey);
+  if (!col?.visible) return false;
+  if (!col.fields?.length) return true;
+  const f = col.fields.find((x) => x.key === fieldKey);
+  return f?.visible !== false;
+}
+
+function onColumnVisibleChange(col: ColumnDef, val: boolean) {
+  col.visible = val;
+  if (val && col.fields?.length) {
+    col.fields.forEach((f) => {
+      f.visible = true;
+    });
+  }
+}
+
+function onFieldVisibleChange(col: ColumnDef, fieldKey: string, val: boolean) {
+  if (!col.fields?.length) return;
+  if (!val) {
+    const visibleCount = col.fields.filter((f) => f.visible && f.key !== fieldKey).length;
+    if (visibleCount === 0) {
+      ElMessage.warning('至少保留一个子字段显示');
+      return;
+    }
+  }
+  const f = col.fields.find((x) => x.key === fieldKey);
+  if (f) f.visible = val;
+}
 
 function filterColumnList() {
   // Enter 触发过滤，computed 已响应 keyword，无需额外逻辑
@@ -1528,12 +1546,44 @@ function filterColumnList() {
 
 function onColumnTemplateChange(id: string) {
   const t = columnTemplates.value.find((x) => x.id === id);
-  if (t) columnDefs.value = deepCloneCols(t.columns);
+  if (t) columnDefs.value = mergeColumnDefsWithDefaults(t.columns);
 }
 
 function resetColumnTemplate() {
   columnSettingTemplate.value = 'default';
+  localStorage.removeItem(COLUMN_DEFAULT_OVERRIDE_KEY);
   columnDefs.value = deepCloneCols(defaultColumnDefs);
+}
+
+function snapshotColumnDefsForTemplate(): ColumnDef[] {
+  return columnDefs.value.map((c) => ({
+    key: c.key,
+    label: c.label,
+    visible: c.visible,
+    fixed: c.fixed,
+    order: c.order,
+    fields: c.fields ? c.fields.map((f) => ({ ...f })) : undefined,
+  }));
+}
+
+/** 将当前列设置写入选中的列表样式（模版），表格已实时跟随 columnDefs，保存用于持久化与对齐模版快照 */
+function saveCurrentColumnTemplate() {
+  const id = columnSettingTemplate.value;
+  const tpl = columnTemplates.value.find((x) => x.id === id);
+  if (!tpl) {
+    ElMessage.warning('未找到当前列表样式');
+    return;
+  }
+  tpl.columns = snapshotColumnDefsForTemplate();
+  if (id === 'default') {
+    localStorage.setItem(COLUMN_DEFAULT_OVERRIDE_KEY, JSON.stringify(tpl.columns));
+  } else {
+    localStorage.setItem(
+      COLUMN_STORAGE_KEY,
+      JSON.stringify(columnTemplates.value.filter((t) => t.id !== 'default'))
+    );
+  }
+  ElMessage.success('已保存');
 }
 
 function batchColumnOp(op: 'hide' | 'show' | 'pinTop' | 'pinBottom' | 'moveUp' | 'moveDown') {
@@ -1547,7 +1597,14 @@ function batchColumnOp(op: 'hide' | 'show' | 'pinTop' | 'pinBottom' | 'moveUp' |
   if (op === 'hide') {
     checked.forEach((c) => (c.visible = false));
   } else if (op === 'show') {
-    checked.forEach((c) => (c.visible = true));
+    checked.forEach((c) => {
+      c.visible = true;
+      if (c.fields?.length) {
+        c.fields.forEach((f) => {
+          f.visible = true;
+        });
+      }
+    });
   } else if (op === 'pinTop') {
     let minOrder = Math.min(...sorted.map((c) => c.order));
     checked.forEach((c) => {
@@ -1599,12 +1656,13 @@ function saveColumnTemplate() {
   const tpl: ColumnTemplate = {
     id,
     name,
-    columns: columnDefs.value.map(({ key, label, visible, fixed, order }) => ({
-      key,
-      label,
-      visible,
-      fixed,
-      order,
+    columns: columnDefs.value.map((c) => ({
+      key: c.key,
+      label: c.label,
+      visible: c.visible,
+      fixed: c.fixed,
+      order: c.order,
+      fields: c.fields ? c.fields.map((f) => ({ ...f })) : undefined,
     })),
   };
   const extra = columnTemplates.value.filter((t) => t.id !== 'default');
@@ -1926,75 +1984,7 @@ doSearch();
 <template>
   <PageContent class="security-policy-page">
     <div class="security-policy-layout">
-      <!-- 左侧设备树（固定高度、独立滚动） -->
-      <div class="left-panel">
-        <div class="panel-title-row">
-          <span class="panel-title">设备（{{ deviceCount }}）</span>
-          <ElTooltip content="添加设备">
-            <span class="device-add-icon" @click="ElMessage.info('添加设备（占位）')">
-              <ElIcon :size="20"><CirclePlus /></ElIcon>
-            </span>
-          </ElTooltip>
-        </div>
-        <ElInput
-          v-model="deviceKeyword"
-          size="small"
-          class="device-search"
-          placeholder="输入关键字"
-          clearable
-          @keydown.enter.prevent
-        />
-        <div class="tree-wrap">
-          <ElTree
-            :data="treeData"
-            :props="defaultProps"
-            show-checkbox
-            node-key="id"
-            :default-expand-all="true"
-            @check="handleTreeCheck"
-            @node-contextmenu="onTreeContextMenu"
-          >
-            <template #default="{ node, data }">
-              <span class="tree-node">
-                <span v-if="!data.isGroup" class="node-icon">{{ getNodeIcon(data) }}</span>
-                <span class="node-label">{{ node.label }}</span>
-                <span v-if="!data.isGroup" class="node-ops" @click.stop>
-                  <ElDropdown trigger="click" placement="right-start">
-                    <span class="node-ops__btn">
-                      <ElIcon><MoreFilled /></ElIcon>
-                    </span>
-                    <template #dropdown>
-                      <ElDropdownMenu>
-                        <ElDropdownItem @click="handleDeviceManage">设备管理</ElDropdownItem>
-                        <ElDropdownItem @click="handleDeviceDetail">设备详情</ElDropdownItem>
-                        <ElDropdownItem @click="handleConfigUpdate">配置更新</ElDropdownItem>
-                        <ElDropdownItem @click="downloadDeviceConfig(data.device)">配置下载</ElDropdownItem>
-                        <ElDropdownItem @click="openDeviceProps(data.device)">属性</ElDropdownItem>
-                        <ElDropdownItem divided @click="handleDeviceDelete">设备删除</ElDropdownItem>
-                      </ElDropdownMenu>
-                    </template>
-                  </ElDropdown>
-                </span>
-              </span>
-            </template>
-          </ElTree>
-        </div>
-      </div>
-
-      <!-- 右键菜单（仅防火墙节点） -->
-      <div
-        v-show="contextMenuVisible"
-        class="context-menu"
-        :style="{ left: contextMenuPosition.x + 'px', top: contextMenuPosition.y + 'px' }"
-        @click.stop
-      >
-        <div class="context-item" @click="handleDeviceManage">设备管理</div>
-        <div class="context-item" @click="handleDeviceDetail">设备详情</div>
-        <div class="context-item" @click="handleConfigUpdate">配置更新</div>
-        <div class="context-item" @click="handleConfigDownload">配置下载</div>
-        <div class="context-item danger" @click="handleDeviceDelete">设备删除</div>
-      </div>
-      <div v-show="contextMenuVisible" class="context-menu-mask" @click="closeContextMenu" />
+      <SecurityPolicyDeviceTree v-model:selected-ids="selectedDeviceIds" />
 
       <!-- 右侧 -->
       <div class="right-panel">
@@ -2578,7 +2568,7 @@ doSearch();
                 <ElPopover
                   v-model:visible="columnSettingVisible"
                   placement="bottom-end"
-                  :width="420"
+                  :width="520"
                   trigger="click"
                 >
                   <template #reference>
@@ -2619,54 +2609,115 @@ doSearch();
                       </div>
                     </div>
                     <div class="column-setting-batch">
-                      <ElButton type="primary" size="small" @click="batchColumnOp('hide')">隐藏</ElButton>
-                      <ElButton type="primary" size="small" @click="batchColumnOp('show')">显示</ElButton>
-                      <ElButton type="primary" size="small" @click="batchColumnOp('pinTop')">置顶</ElButton>
-                      <ElButton type="primary" size="small" @click="batchColumnOp('pinBottom')">置底</ElButton>
-                      <ElButton type="primary" size="small" @click="batchColumnOp('moveUp')">上移</ElButton>
-                      <ElButton type="primary" size="small" @click="batchColumnOp('moveDown')">下移</ElButton>
+                      <ElTooltip content="隐藏" placement="top">
+                        <span class="column-setting-batch-icon" @click="batchColumnOp('hide')">
+                          <ElIcon :size="18"><Hide /></ElIcon>
+                        </span>
+                      </ElTooltip>
+                      <ElTooltip content="显示" placement="top">
+                        <span class="column-setting-batch-icon" @click="batchColumnOp('show')">
+                          <ElIcon :size="18"><View /></ElIcon>
+                        </span>
+                      </ElTooltip>
+                      <ElTooltip content="置顶" placement="top">
+                        <span class="column-setting-batch-icon" @click="batchColumnOp('pinTop')">
+                          <ElIcon :size="18"><Top /></ElIcon>
+                        </span>
+                      </ElTooltip>
+                      <ElTooltip content="置底" placement="top">
+                        <span class="column-setting-batch-icon" @click="batchColumnOp('pinBottom')">
+                          <ElIcon :size="18"><Bottom /></ElIcon>
+                        </span>
+                      </ElTooltip>
+                      <ElTooltip content="上移" placement="top">
+                        <span class="column-setting-batch-icon" @click="batchColumnOp('moveUp')">
+                          <ElIcon :size="18"><ArrowUp /></ElIcon>
+                        </span>
+                      </ElTooltip>
+                      <ElTooltip content="下移" placement="top">
+                        <span class="column-setting-batch-icon" @click="batchColumnOp('moveDown')">
+                          <ElIcon :size="18"><ArrowDown /></ElIcon>
+                        </span>
+                      </ElTooltip>
                     </div>
                     <div class="column-setting-list">
                       <div class="column-setting-list-header">
                         <span class="col-check">序号</span>
+                        <span class="col-num">#</span>
                         <span class="col-name">表头名称</span>
                         <span class="col-vis">隐藏/显示</span>
                         <span class="col-fix">固定位置</span>
                       </div>
-                      <div
-                        v-for="(col, idx) in filteredColumnDefs"
-                        :key="col.key"
-                        class="column-setting-row"
-                      >
-                        <span class="col-check">
-                          <ElCheckbox v-model="col.checked" />
-                        </span>
-                        <span class="col-num">{{ idx + 1 }}</span>
-                        <span class="col-name">{{ col.label }}</span>
-                        <span class="col-vis">
-                          <ElSwitch v-model="col.visible" size="small" />
-                        </span>
-                        <span class="col-fix">
-                          <ElButton
-                            :type="col.fixed === 'left' ? 'primary' : 'default'"
-                            size="small"
-                            @click="col.fixed = 'left'"
-                          >左</ElButton>
-                          <ElButton
-                            :type="col.fixed === false || col.fixed === '' ? 'primary' : 'default'"
-                            size="small"
-                            @click="col.fixed = false"
-                          >不固定</ElButton>
-                          <ElButton
-                            :type="col.fixed === 'right' ? 'primary' : 'default'"
-                            size="small"
-                            @click="col.fixed = 'right'"
-                          >右</ElButton>
-                        </span>
-                      </div>
+                      <template v-for="(col, idx) in filteredColumnDefs" :key="col.key">
+                        <div class="column-setting-row">
+                          <span class="col-check">
+                            <ElCheckbox v-model="col.checked" />
+                          </span>
+                          <span class="col-num">{{ idx + 1 }}</span>
+                          <span class="col-name">{{ col.label }}</span>
+                          <span class="col-vis">
+                            <ElSwitch
+                              :model-value="col.visible"
+                              size="small"
+                              @update:model-value="(v) => onColumnVisibleChange(col, !!v)"
+                            />
+                          </span>
+                          <span class="col-fix">
+                            <span class="column-fix-seg">
+                              <ElTooltip content="左固定" placement="top">
+                                <span
+                                  class="column-fix-seg__btn"
+                                  :class="{ 'is-active': col.fixed === 'left' }"
+                                  @click="col.fixed = 'left'"
+                                >
+                                  <ElIcon :size="16"><DArrowLeft /></ElIcon>
+                                </span>
+                              </ElTooltip>
+                              <ElTooltip content="不固定" placement="top">
+                                <span
+                                  class="column-fix-seg__btn"
+                                  :class="{ 'is-active': col.fixed === false || col.fixed === '' }"
+                                  @click="col.fixed = false"
+                                >
+                                  <ElIcon :size="16"><Rank /></ElIcon>
+                                </span>
+                              </ElTooltip>
+                              <ElTooltip content="右固定" placement="top">
+                                <span
+                                  class="column-fix-seg__btn"
+                                  :class="{ 'is-active': col.fixed === 'right' }"
+                                  @click="col.fixed = 'right'"
+                                >
+                                  <ElIcon :size="16"><DArrowRight /></ElIcon>
+                                </span>
+                              </ElTooltip>
+                            </span>
+                          </span>
+                        </div>
+                        <template v-if="isMultiFieldColumnDef(col)">
+                          <div
+                            v-for="f in col.fields"
+                            :key="col.key + '-' + f.key"
+                            class="column-setting-subrow"
+                          >
+                            <span class="col-check" />
+                            <span class="col-num" />
+                            <span class="col-name col-name--sub">{{ f.label }}</span>
+                            <span class="col-vis">
+                              <ElSwitch
+                                :model-value="f.visible"
+                                size="small"
+                                @update:model-value="(v) => onFieldVisibleChange(col, f.key, !!v)"
+                              />
+                            </span>
+                            <span class="col-fix" />
+                          </div>
+                        </template>
+                      </template>
                     </div>
                     <div class="column-setting-footer">
                       <ElButton type="primary" @click="openSaveColumnTemplate">另存为</ElButton>
+                      <ElButton type="primary" @click="saveCurrentColumnTemplate">保存</ElButton>
                     </div>
                   </div>
                 </ElPopover>
@@ -2682,181 +2733,227 @@ doSearch();
               >
             <ElTableColumn type="selection" width="44" fixed="left" />
             <ElTableColumn label="序号" type="index" width="60" fixed="left" :index="indexMethod" />
-            <ElTableColumn label="策略信息" min-width="120">
-              <template #default="{ row }">
-                <div v-if="row.id" class="cell-two-line">
-                  <div class="cell-line cell-ellipsis" v-html="highlightSearchHtml(row.name)" />
-                  <div class="cell-line cell-ellipsis">
-                    <span>ID：</span><span v-html="highlightSearchHtml(row.id)" />
+            <template v-for="col in sortedColumnDefsForRender" :key="col.key">
+              <ElTableColumn
+                v-if="col.key === 'policyInfo'"
+                :label="col.label"
+                min-width="120"
+                :fixed="columnFixedProp(col)"
+              >
+                <template #default="{ row }">
+                  <div v-if="row.id" class="cell-two-line">
+                    <div v-if="isFieldVisible('policyInfo', 'name')" class="cell-line cell-ellipsis" v-html="highlightSearchHtml(row.name)" />
+                    <div v-if="isFieldVisible('policyInfo', 'id')" class="cell-line cell-ellipsis">
+                      <span>ID：</span><span v-html="highlightSearchHtml(row.id)" />
+                    </div>
                   </div>
-                </div>
-              </template>
-            </ElTableColumn>
-            <ElTableColumn label="源" min-width="160">
-              <template #default="{ row }">
-                <div v-if="row.id" class="cell-two-line">
-                  <div class="cell-line cell-ellipsis" v-html="highlightSearchHtml('域：' + row.srcZone)" />
-                  <ElTooltip placement="top" :disabled="!row.srcIp?.length" popper-class="tag-stats-tooltip-popper">
-                    <template #content>
-                      <div class="hover-ip-list">
-                        <div v-for="(line, idx) in srcIpHoverLines(row)" :key="idx" class="hover-ip-line">{{ line }}</div>
-                      </div>
-                    </template>
-                    <div
-                      class="cell-line cell-ellipsis"
-                      v-html="highlightSearchHtml(row.srcIp?.length ? 'IP：' + row.srcIp.join('，') : 'IP：-')"
-                    />
-                  </ElTooltip>
-                </div>
-              </template>
-            </ElTableColumn>
-            <ElTableColumn label="目的" min-width="160">
-              <template #default="{ row }">
-                <div v-if="row.id" class="cell-two-line">
-                  <div class="cell-line cell-ellipsis" v-html="highlightSearchHtml('域：' + row.dstZone)" />
-                  <ElTooltip placement="top" :disabled="!row.dstIp?.length" popper-class="tag-stats-tooltip-popper">
-                    <template #content>
-                      <div class="hover-ip-list">
-                        <div v-for="(line, idx) in dstIpHoverLines(row)" :key="idx" class="hover-ip-line">{{ line }}</div>
-                      </div>
-                    </template>
-                    <div
-                      class="cell-line cell-ellipsis"
-                      v-html="highlightSearchHtml(row.dstIp?.length ? 'IP：' + row.dstIp.join('，') : 'IP：-')"
-                    />
-                  </ElTooltip>
-                </div>
-              </template>
-            </ElTableColumn>
-            <ElTableColumn label="服务" min-width="90">
-              <template #default="{ row }">
-                <div v-if="row.id" class="cell-two-line service-cell">
-                  <ElTooltip placement="top" :disabled="!row.service?.length" popper-class="tag-stats-tooltip-popper">
-                    <template #content>
-                      <div class="hover-ip-list">
-                        <div v-for="(line, idx) in serviceHoverLines(row)" :key="idx" class="hover-ip-line">{{ line }}</div>
-                      </div>
-                    </template>
-                    <div
-                      class="cell-line cell-ellipsis service-text"
-                      v-html="highlightSearchHtml(row.service?.length ? row.service.join('，') : '-')"
-                    />
-                  </ElTooltip>
-                </div>
-              </template>
-            </ElTableColumn>
-            <ElTableColumn label="动作" width="70">
-              <template #default="{ row }">
-                <ElTag v-if="row.id" :type="row.action === 'allow' ? 'success' : 'danger'" size="small">
-                  <span v-html="highlightSearchHtml(row.action === 'allow' ? '允许' : '拒绝')" />
-                </ElTag>
-              </template>
-            </ElTableColumn>
-            <ElTableColumn label="优化类型" min-width="140">
-              <template #default="{ row }">
-                <div v-if="row.id" class="cell-two-line optimize-type-cell">
-                  <ElTooltip
-                    v-if="optimizeTagsDisplay(row).length > 0"
-                    :content="optimizeTagsTip(row)"
-                    placement="top"
+                </template>
+              </ElTableColumn>
+              <ElTableColumn v-if="col.key === 'src'" :label="col.label" min-width="160" :fixed="columnFixedProp(col)">
+                <template #default="{ row }">
+                  <div v-if="row.id" class="cell-two-line">
+                    <div v-if="isFieldVisible('src', 'zone')" class="cell-line cell-ellipsis" v-html="highlightSearchHtml('域：' + row.srcZone)" />
+                    <ElTooltip
+                      v-if="isFieldVisible('src', 'ip')"
+                      placement="top"
+                      :disabled="!row.srcIp?.length"
+                      popper-class="tag-stats-tooltip-popper"
+                    >
+                      <template #content>
+                        <div class="hover-ip-list">
+                          <div v-for="(line, idx) in srcIpHoverLines(row)" :key="idx" class="hover-ip-line">{{ line }}</div>
+                        </div>
+                      </template>
+                      <div
+                        class="cell-line cell-ellipsis"
+                        v-html="highlightSearchHtml(row.srcIp?.length ? 'IP：' + row.srcIp.join('，') : 'IP：-')"
+                      />
+                    </ElTooltip>
+                  </div>
+                </template>
+              </ElTableColumn>
+              <ElTableColumn v-if="col.key === 'dst'" :label="col.label" min-width="160" :fixed="columnFixedProp(col)">
+                <template #default="{ row }">
+                  <div v-if="row.id" class="cell-two-line">
+                    <div v-if="isFieldVisible('dst', 'zone')" class="cell-line cell-ellipsis" v-html="highlightSearchHtml('域：' + row.dstZone)" />
+                    <ElTooltip
+                      v-if="isFieldVisible('dst', 'ip')"
+                      placement="top"
+                      :disabled="!row.dstIp?.length"
+                      popper-class="tag-stats-tooltip-popper"
+                    >
+                      <template #content>
+                        <div class="hover-ip-list">
+                          <div v-for="(line, idx) in dstIpHoverLines(row)" :key="idx" class="hover-ip-line">{{ line }}</div>
+                        </div>
+                      </template>
+                      <div
+                        class="cell-line cell-ellipsis"
+                        v-html="highlightSearchHtml(row.dstIp?.length ? 'IP：' + row.dstIp.join('，') : 'IP：-')"
+                      />
+                    </ElTooltip>
+                  </div>
+                </template>
+              </ElTableColumn>
+              <ElTableColumn v-if="col.key === 'service'" :label="col.label" min-width="90" :fixed="columnFixedProp(col)">
+                <template #default="{ row }">
+                  <div v-if="row.id" class="cell-two-line service-cell">
+                    <ElTooltip placement="top" :disabled="!row.service?.length" popper-class="tag-stats-tooltip-popper">
+                      <template #content>
+                        <div class="hover-ip-list">
+                          <div v-for="(line, idx) in serviceHoverLines(row)" :key="idx" class="hover-ip-line">{{ line }}</div>
+                        </div>
+                      </template>
+                      <div
+                        class="cell-line cell-ellipsis service-text"
+                        v-html="highlightSearchHtml(row.service?.length ? row.service.join('，') : '-')"
+                      />
+                    </ElTooltip>
+                  </div>
+                </template>
+              </ElTableColumn>
+              <ElTableColumn v-if="col.key === 'action'" :label="col.label" width="70" :fixed="columnFixedProp(col)">
+                <template #default="{ row }">
+                  <ElTag v-if="row.id" :type="row.action === 'allow' ? 'success' : 'danger'" size="small">
+                    <span v-html="highlightSearchHtml(row.action === 'allow' ? '允许' : '拒绝')" />
+                  </ElTag>
+                </template>
+              </ElTableColumn>
+              <ElTableColumn v-if="col.key === 'optimizeType'" :label="col.label" min-width="140" :fixed="columnFixedProp(col)">
+                <template #default="{ row }">
+                  <div v-if="row.id" class="cell-two-line optimize-type-cell">
+                    <ElTooltip
+                      v-if="optimizeTagsDisplay(row).length > 0"
+                      :content="optimizeTagsTip(row)"
+                      placement="top"
+                    >
+                      <span
+                        class="optimize-text-link"
+                        @click="openOptimizeDialog(row)"
+                        v-html="highlightSearchHtml(optimizeTagsDisplay(row).join('，'))"
+                      />
+                    </ElTooltip>
+                    <span v-else class="optimize-text-empty"></span>
+                  </div>
+                </template>
+              </ElTableColumn>
+              <ElTableColumn
+                v-if="col.key === 'statusPriority'"
+                :label="col.label"
+                min-width="100"
+                class-name="col-no-wrap"
+                :fixed="columnFixedProp(col)"
+              >
+                <template #default="{ row }">
+                  <div v-if="row.id" class="status-priority-cell">
+                    <ElTag v-if="isFieldVisible('statusPriority', 'status')" :type="row.enabled ? 'success' : 'danger'" size="small">{{ row.enabled ? '启用' : '停用' }}</ElTag>
+                    <span v-if="isFieldVisible('statusPriority', 'priority')" class="priority-val" v-html="highlightSearchHtml(row.priority)" />
+                  </div>
+                </template>
+              </ElTableColumn>
+              <ElTableColumn v-if="col.key === 'deviceInfo'" :label="col.label" width="120" :fixed="columnFixedProp(col)">
+                <template #default="{ row }">
+                  <div v-if="row.id" class="cell-two-line">
+                    <div v-if="isFieldVisible('deviceInfo', 'name')" class="cell-line" v-html="highlightSearchHtml(row.deviceName)" />
+                    <div v-if="isFieldVisible('deviceInfo', 'ip')" class="cell-line" v-html="highlightSearchHtml(row.deviceIp ?? '')" />
+                  </div>
+                </template>
+              </ElTableColumn>
+              <ElTableColumn v-if="col.key === 'natInfo'" :label="col.label" width="200" :fixed="columnFixedProp(col)">
+                <template #default="{ row }">
+                  <div
+                    v-if="
+                      row.id &&
+                      ((isFieldVisible('natInfo', 'snat') && row.snatSourceIps && row.snatSourceIps.length) ||
+                        (isFieldVisible('natInfo', 'dnat') && row.dnatDest))
+                    "
+                    class="nat-cell"
+                    :class="{
+                      'nat-cell--single':
+                        !(isFieldVisible('natInfo', 'snat') && row.snatSourceIps && row.snatSourceIps.length) ||
+                        !(isFieldVisible('natInfo', 'dnat') && row.dnatDest),
+                    }"
                   >
-                    <span
-                      class="optimize-text-link"
-                      @click="openOptimizeDialog(row)"
-                      v-html="highlightSearchHtml(optimizeTagsDisplay(row).join('，'))"
-                    />
-                  </ElTooltip>
-                  <span v-else class="optimize-text-empty"></span>
-                </div>
-              </template>
-            </ElTableColumn>
-            <ElTableColumn label="状态/优先级" min-width="100" class-name="col-no-wrap">
-              <template #default="{ row }">
-                <div v-if="row.id" class="status-priority-cell">
-                  <ElTag :type="row.enabled ? 'success' : 'danger'" size="small">{{ row.enabled ? '启用' : '停用' }}</ElTag>
-                  <span class="priority-val" v-html="highlightSearchHtml(row.priority)" />
-                </div>
-              </template>
-            </ElTableColumn>
-            <ElTableColumn label="设备信息" width="120">
-              <template #default="{ row }">
-                <div v-if="row.id" class="cell-two-line">
-                  <div class="cell-line" v-html="highlightSearchHtml(row.deviceName)" />
-                  <div class="cell-line" v-html="highlightSearchHtml(row.deviceIp ?? '')" />
-                </div>
-              </template>
-            </ElTableColumn>
-            <ElTableColumn label="NAT信息" width="200">
-              <template #default="{ row }">
-                <div
-                  v-if="row.id && ((row.snatSourceIps && row.snatSourceIps.length) || row.dnatDest)"
-                  class="nat-cell"
-                  :class="{ 'nat-cell--single': !(row.snatSourceIps && row.snatSourceIps.length) || !row.dnatDest }"
-                >
-                  <div v-if="row.snatSourceIps && row.snatSourceIps.length" class="nat-cell-line">
-                    <ElTooltip
-                      v-if="row.snatRules && row.snatRules.length"
-                      :content="natRulesTooltip(row.snatRules)"
+                    <div
+                      v-if="isFieldVisible('natInfo', 'snat') && row.snatSourceIps && row.snatSourceIps.length"
+                      class="nat-cell-line"
                     >
-                      <ElIcon class="nat-icon" @click.stop="openNatDialog(row, 'snat')"><WarningFilled /></ElIcon>
-                    </ElTooltip>
-                    <ElTooltip :content="row.snatSourceIps.join('，')">
-                      <span class="nat-cell-text" v-html="highlightSearchHtml('snat：' + row.snatSourceIps.join('，'))" />
-                    </ElTooltip>
+                      <ElTooltip
+                        v-if="row.snatRules && row.snatRules.length"
+                        :content="natRulesTooltip(row.snatRules)"
+                      >
+                        <ElIcon class="nat-icon" @click.stop="openNatDialog(row, 'snat')"><WarningFilled /></ElIcon>
+                      </ElTooltip>
+                      <ElTooltip :content="row.snatSourceIps.join('，')">
+                        <span class="nat-cell-text" v-html="highlightSearchHtml('snat：' + row.snatSourceIps.join('，'))" />
+                      </ElTooltip>
+                    </div>
+                    <div v-if="isFieldVisible('natInfo', 'dnat') && row.dnatDest" class="nat-cell-line">
+                      <ElTooltip
+                        v-if="row.dnatRules && row.dnatRules.length"
+                        :content="natRulesTooltip(row.dnatRules)"
+                      >
+                        <ElIcon class="nat-icon" @click.stop="openNatDialog(row, 'dnat')"><WarningFilled /></ElIcon>
+                      </ElTooltip>
+                      <ElTooltip :content="row.dnatDest">
+                        <span class="nat-cell-text" v-html="highlightSearchHtml('dnat：' + row.dnatDest)" />
+                      </ElTooltip>
+                    </div>
                   </div>
-                  <div v-if="row.dnatDest" class="nat-cell-line">
-                    <ElTooltip
-                      v-if="row.dnatRules && row.dnatRules.length"
-                      :content="natRulesTooltip(row.dnatRules)"
+                </template>
+              </ElTableColumn>
+              <ElTableColumn
+                v-if="col.key === 'archive'"
+                :label="col.label"
+                min-width="200"
+                class-name="archive-column-cell"
+                :fixed="columnFixedProp(col)"
+              >
+                <template #default="{ row }">
+                  <div v-if="row.id" class="archive-cell">
+                    <span v-if="isFieldVisible('archive', 'content')" class="archive-text-wrap">
+                      <ElTooltip v-if="formatArchiveDisplay(row)" :content="formatArchiveDisplay(row)" placement="top">
+                        <span class="archive-text archive-text-two-line" v-html="highlightSearchHtml(formatArchiveDisplay(row))" />
+                      </ElTooltip>
+                      <span v-else class="archive-text archive-text-two-line">&nbsp;</span>
+                    </span>
+                    <ElIcon v-if="isFieldVisible('archive', 'edit')" class="archive-edit-icon" @click.stop="openArchiveEdit(row)"><Edit /></ElIcon>
+                  </div>
+                </template>
+              </ElTableColumn>
+              <ElTableColumn v-if="col.key === 'remark'" :label="col.label" min-width="180" :fixed="columnFixedProp(col)">
+                <template #default="{ row }">
+                  <div v-if="row.id" class="cell-two-line remark-cell">
+                    <ElTooltip v-if="row.remark" :content="row.remark" placement="top">
+                      <span class="cell-line cell-ellipsis" v-html="highlightSearchHtml(row.remark)" />
+                    </ElTooltip>
+                    <span v-else class="cell-line cell-ellipsis"></span>
+                  </div>
+                </template>
+              </ElTableColumn>
+              <ElTableColumn
+                v-if="col.key === 'operation'"
+                :label="col.label"
+                min-width="100"
+                class-name="op-column"
+                :fixed="columnFixedProp(col)"
+              >
+                <template #default="{ row }">
+                  <span v-if="row.id" class="op-cell">
+                    <ElButton
+                      v-for="op in visibleOps"
+                      :key="op.key"
+                      link
+                      type="primary"
+                      size="small"
+                      @click="op.handler(row)"
                     >
-                      <ElIcon class="nat-icon" @click.stop="openNatDialog(row, 'dnat')"><WarningFilled /></ElIcon>
-                    </ElTooltip>
-                    <ElTooltip :content="row.dnatDest">
-                      <span class="nat-cell-text" v-html="highlightSearchHtml('dnat：' + row.dnatDest)" />
-                    </ElTooltip>
-                  </div>
-                </div>
-              </template>
-            </ElTableColumn>
-            <ElTableColumn label="档案" min-width="200" class-name="archive-column-cell">
-              <template #default="{ row }">
-                <div class="archive-cell">
-                  <span class="archive-text-wrap">
-                    <ElTooltip v-if="formatArchiveDisplay(row)" :content="formatArchiveDisplay(row)" placement="top">
-                      <span class="archive-text archive-text-two-line" v-html="highlightSearchHtml(formatArchiveDisplay(row))" />
-                    </ElTooltip>
-                    <span v-else class="archive-text archive-text-two-line">&nbsp;</span>
+                      {{ op.label }}
+                    </ElButton>
                   </span>
-                  <ElIcon class="archive-edit-icon" @click.stop="openArchiveEdit(row)"><Edit /></ElIcon>
-                </div>
-              </template>
-            </ElTableColumn>
-            <ElTableColumn label="策略备注" min-width="180">
-              <template #default="{ row }">
-                <div v-if="row.id" class="cell-two-line remark-cell">
-                  <ElTooltip v-if="row.remark" :content="row.remark" placement="top">
-                    <span class="cell-line cell-ellipsis" v-html="highlightSearchHtml(row.remark)" />
-                  </ElTooltip>
-                  <span v-else class="cell-line cell-ellipsis"></span>
-                </div>
-              </template>
-            </ElTableColumn>
-            <ElTableColumn label="操作" min-width="100" fixed="right" class-name="op-column">
-              <template #default="{ row }">
-                <span v-if="row.id" class="op-cell">
-                  <ElButton
-                    v-for="op in visibleOps"
-                    :key="op.key"
-                    link
-                    type="primary"
-                    size="small"
-                    @click="op.handler(row)"
-                  >
-                    {{ op.label }}
-                  </ElButton>
-                </span>
-              </template>
-            </ElTableColumn>
+                </template>
+              </ElTableColumn>
+            </template>
           </ElTable>
           </div>
           <div class="table-pagination">
@@ -3386,30 +3483,6 @@ doSearch();
       </template>
     </ElDialog>
 
-    <!-- 设备属性弹窗 -->
-    <ElDialog v-model="devicePropsVisible" title="属性" width="640px">
-      <div class="device-props">
-        <div class="device-props__row"><span class="k">名称</span><span class="v">{{ devicePropsDevice?.name || '-' }}</span></div>
-        <div class="device-props__row"><span class="k">IP</span><span class="v">{{ devicePropsDevice?.ip || '-' }}</span></div>
-        <div class="device-props__row"><span class="k">型号</span><span class="v">{{ devicePropsDevice?.model || '-' }}</span></div>
-        <div class="device-props__row"><span class="k">状态</span><span class="v">{{ devicePropsDevice?.enabled ? '启用' : '停用' }}</span></div>
-        <div class="device-props__row"><span class="k">获取方式</span><span class="v">{{ devicePropsDevice?.fetchMode || '-' }}</span></div>
-        <div class="device-props__row"><span class="k">采集周期</span><span class="v">{{ devicePropsDevice?.collectCycle || '-' }}</span></div>
-        <div class="device-props__row"><span class="k">位置</span><span class="v">{{ devicePropsDevice?.location || '-' }}</span></div>
-        <div class="device-props__row"><span class="k">设备组</span><span class="v">-</span></div>
-        <div class="device-props__row"><span class="k">DNAT匹配方式</span><span class="v">{{ devicePropsDevice?.dnatMatchMode || '-' }}</span></div>
-        <div class="device-props__row"><span class="k">web管理访问</span><span class="v">{{ devicePropsDevice?.webManage || '-' }}</span></div>
-        <div class="device-props__row"><span class="k">合规分析</span><span class="v">{{ devicePropsDevice?.complianceEnabled ? '启用' : '停用' }}</span></div>
-        <div class="device-props__row"><span class="k">配置备份</span><span class="v">{{ devicePropsDevice?.backupEnabled ? '启用' : '停用' }}</span></div>
-        <div class="device-props__row"><span class="k">策略分析</span><span class="v">{{ devicePropsDevice?.policyAnalysisEnabled ? '启用' : '停用' }}</span></div>
-        <div class="device-props__row"><span class="k">设备性能分析</span><span class="v">{{ devicePropsDevice?.performanceEnabled ? '启用' : '停用' }}</span></div>
-        <div class="device-props__row"><span class="k">硬件版本</span><span class="v">{{ devicePropsDevice?.hardwareVersion || '-' }}</span></div>
-        <div class="device-props__row"><span class="k">备注</span><span class="v">{{ devicePropsDevice?.remark || '-' }}</span></div>
-        <div class="device-props__row"><span class="k">最近更新时间</span><span class="v">{{ devicePropsDevice?.updatedAt || '-' }}</span></div>
-        <div class="device-props__row"><span class="k">创建时间</span><span class="v">{{ devicePropsDevice?.createdAt || '-' }}</span></div>
-        <div class="device-props__row"><span class="k">创建人</span><span class="v">{{ devicePropsDevice?.createdBy || '-' }}</span></div>
-      </div>
-    </ElDialog>
   </PageContent>
 </template>
 
@@ -3429,105 +3502,6 @@ doSearch();
   gap: 12px;
   min-height: 0;
   overflow: hidden;
-}
-.left-panel {
-  width: 260px;
-  flex-shrink: 0;
-  border: 1px solid var(--el-border-color);
-  border-radius: 8px;
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-}
-.panel-title-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 8px;
-  flex-shrink: 0;
-}
-.panel-title {
-  font-weight: 500;
-  font-size: 13px;
-  flex-shrink: 0;
-}
-.device-add-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-primary-light-3) 100%);
-  color: #fff;
-  cursor: pointer;
-  transition: transform 0.2s, box-shadow 0.2s;
-}
-.device-add-icon:hover {
-  transform: scale(1.05);
-  box-shadow: 0 2px 8px rgba(var(--el-color-primary-rgb), 0.4);
-}
-.device-search {
-  margin-bottom: 8px;
-  flex-shrink: 0;
-}
-.tree-wrap {
-  flex: 1;
-  min-height: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 6px;
-  padding: 4px;
-}
-.tree-node {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  width: 100%;
-  justify-content: space-between;
-}
-.node-icon {
-  font-size: 10px;
-}
-.node-label {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.node-ops__btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 4px;
-  cursor: pointer;
-  color: var(--el-text-color-secondary);
-}
-.node-ops__btn:hover {
-  background: var(--el-fill-color-light);
-  color: var(--el-color-primary);
-}
-.device-props__row {
-  display: flex;
-  gap: 12px;
-  padding: 6px 0;
-  border-bottom: 1px dashed var(--el-border-color-lighter);
-}
-.device-props__row .k {
-  width: 120px;
-  color: var(--el-text-color-secondary);
-  flex-shrink: 0;
-}
-.device-props__row .v {
-  flex: 1;
-  min-width: 0;
-  word-break: break-word;
 }
 .right-panel {
   flex: 1;
@@ -4397,9 +4371,67 @@ mark.search-hit {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  align-items: center;
+}
+.column-setting-batch-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--el-border-color);
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--el-text-color-regular);
+  background: var(--el-fill-color-blank);
+  transition: color 0.2s, background 0.2s, border-color 0.2s;
+}
+.column-setting-batch-icon:hover {
+  color: var(--el-color-primary);
+  background: var(--el-fill-color-light);
+  border-color: var(--el-color-primary-light-5);
+}
+.column-fix-seg {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--el-border-color);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.column-fix-seg__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 6px;
+  cursor: pointer;
+  color: var(--el-text-color-secondary);
+  background: var(--el-fill-color-blank);
+  transition: color 0.15s, background 0.15s;
+}
+.column-fix-seg__btn:hover {
+  color: var(--el-color-primary);
+  background: var(--el-fill-color-light);
+}
+.column-fix-seg__btn.is-active {
+  color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+}
+.column-setting-subrow {
+  display: flex;
+  align-items: center;
+  padding: 4px 10px 4px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  background: var(--el-fill-color-lighter);
+}
+.column-name--sub {
+  padding-left: 20px;
+  color: var(--el-text-color-secondary);
 }
 .column-setting-list {
-  max-height: 240px;
+  max-height: 320px;
   overflow-y: auto;
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 4px;
@@ -4413,11 +4445,11 @@ mark.search-hit {
   background: var(--el-fill-color-lighter);
   border-bottom: 1px solid var(--el-border-color-lighter);
 }
-.column-setting-list-header .col-check { width: 36px; }
-.column-setting-list-header .col-num { width: 40px; }
+.column-setting-list-header .col-check { width: 36px; flex-shrink: 0; }
+.column-setting-list-header .col-num { width: 40px; flex-shrink: 0; }
 .column-setting-list-header .col-name { flex: 1; min-width: 80px; }
-.column-setting-list-header .col-vis { width: 80px; }
-.column-setting-list-header .col-fix { width: 140px; }
+.column-setting-list-header .col-vis { width: 80px; flex-shrink: 0; }
+.column-setting-list-header .col-fix { width: 132px; flex-shrink: 0; }
 .column-setting-row {
   display: flex;
   align-items: center;
@@ -4426,14 +4458,22 @@ mark.search-hit {
   border-bottom: 1px solid var(--el-border-color-lighter);
 }
 .column-setting-row:last-child { border-bottom: none; }
-.column-setting-row .col-check { width: 36px; }
-.column-setting-row .col-num { width: 40px; }
+.column-setting-row .col-check { width: 36px; flex-shrink: 0; }
+.column-setting-row .col-num { width: 40px; flex-shrink: 0; }
 .column-setting-row .col-name { flex: 1; min-width: 80px; }
-.column-setting-row .col-vis { width: 80px; }
-.column-setting-row .col-fix { width: 140px; }
+.column-setting-row .col-vis { width: 80px; flex-shrink: 0; }
+.column-setting-row .col-fix { width: 132px; flex-shrink: 0; }
+.column-setting-subrow .col-check { width: 36px; flex-shrink: 0; }
+.column-setting-subrow .col-num { width: 40px; flex-shrink: 0; }
+.column-setting-subrow .col-name { flex: 1; min-width: 80px; }
+.column-setting-subrow .col-vis { width: 80px; flex-shrink: 0; }
+.column-setting-subrow .col-fix { width: 132px; flex-shrink: 0; }
 .column-setting-footer {
   display: flex;
   justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 4px;
 }
 .table-area {
   flex: 1;
@@ -4666,27 +4706,6 @@ mark.search-hit {
   flex-wrap: wrap;
   gap: 2px;
 }
-.context-menu {
-  position: fixed;
-  z-index: 9999;
-  background: var(--el-bg-color-overlay);
-  border: 1px solid var(--el-border-color);
-  border-radius: 6px;
-  box-shadow: var(--el-box-shadow-light);
-  padding: 4px 0;
-  min-width: 120px;
-}
-.context-item {
-  padding: 6px 12px;
-  cursor: pointer;
-  font-size: 13px;
-}
-.context-item:hover {
-  background: var(--el-fill-color);
-}
-.context-item.danger {
-  color: var(--el-color-danger);
-}
 /* 列设置弹窗 */
 .column-setting-panel {
   display: flex;
@@ -4751,10 +4770,6 @@ mark.search-hit {
 .column-setting-row .col-vis { width: 70px; flex-shrink: 0; }
 .column-setting-list-header .col-fix,
 .column-setting-row .col-fix { width: 140px; flex-shrink: 0; }
-.column-setting-footer {
-  text-align: center;
-  padding-top: 4px;
-}
 /* 状态/优先级列：单行紧凑展示 */
 .status-priority-cell {
   display: inline-flex;
@@ -4762,12 +4777,6 @@ mark.search-hit {
   gap: 6px;
   white-space: nowrap;
 }
-.context-menu-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 9998;
-}
-
 /* 策略明细弹窗 */
 .policy-detail-dialog :deep(.el-dialog__body) {
   max-height: 70vh;

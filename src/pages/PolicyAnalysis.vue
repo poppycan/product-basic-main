@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { InfoFilled, Plus, Setting, UploadFilled, Download, Document } from '@element-plus/icons-vue';
+import { InfoFilled, Setting, Document } from '@element-plus/icons-vue';
 import PageHeader from '@/components/PageHeader.vue';
 import PageContent from '@/components/PageContent.vue';
 import PolicyAnalysisHeaderActions from '@/components/PolicyAnalysisHeaderActions.vue';
@@ -22,9 +22,6 @@ const isSecurityPolicy = computed(() => route.path === '/policy-analysis/securit
 // 页头操作（仅安全策略页显示）
 const addDeviceVisible = ref(false);
 const uploadConfigVisible = ref(false);
-function openAddDevice() {
-  addDeviceVisible.value = true;
-}
 function goOptimizeLog() {
   void router.push('/policy-analysis/optimize-log');
 }
@@ -33,19 +30,6 @@ function goFirewallDeviceManagement() {
 }
 function goTagManage() {
   void router.push('/tag-manage');
-}
-function openUploadConfig() {
-  uploadConfigVisible.value = true;
-}
-function downloadConfig() {
-  // 占位下载
-  const blob = new Blob(['下载配置（占位）'], { type: 'text/plain;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'config-placeholder.txt';
-  a.click();
-  URL.revokeObjectURL(url);
 }
 
 async function loadPageDoc() {

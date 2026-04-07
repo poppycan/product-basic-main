@@ -55,12 +55,17 @@ export interface DeviceTreeNode {
 /** 含 any 过滤 */
 export type AnyMode = 'include' | 'exclude' | '';
 
-/** 匹配模式 */
-export type MatchMode = 'all' | 'include' | 'exclude' | 'equal' | 'partial';
+/** 匹配模式：全包含 / 排除条件 / 相等 / 部分匹配（默认） */
+export type MatchMode = 'fullInclude' | 'exclude' | 'equal' | 'partial';
 
 /** 检索条件 */
 export interface SearchParams {
+  /** 高级检索表达式 */
   queryText?: string;
+  /** 普通检索：单行自由文本（名称、ID、IP、端口、动作、区域、优先级、标签、负责人、专线、档案等） */
+  normalQueryText?: string;
+  /** 当前检索模式（用于收藏回显） */
+  searchMode?: 'normal' | 'advanced';
   policyNameOrId?: string;
   action?: string;
   srcIp?: string;

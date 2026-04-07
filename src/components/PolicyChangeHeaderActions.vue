@@ -7,8 +7,8 @@ const router = useRouter();
 
 const entries = [
   { label: '策略开通', path: '/policy-change/open' },
-  { label: '策略修改', path: '/policy-change/modify' },
-  { label: '策略编辑', path: '/policy-change/edit' },
+  { label: 'NAT开通', path: '/policy-change/nat-open' },
+  { label: '策略开通明细', path: '/policy-change/open-detail' },
   { label: '策略回收', path: '/policy-change/recycle' },
 ];
 

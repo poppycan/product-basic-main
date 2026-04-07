@@ -87,15 +87,25 @@ const routes: RouteRecordRaw[] = [
       },
       {
         path: 'policy-change',
-        name: 'policy-change',
-        component: () => import('@/pages/PolicyChange.vue'),
-        meta: { title: 'policyChange', showSideNav: true },
+        redirect: { name: 'policy-change-open' },
       },
       {
         path: 'policy-change/open',
         name: 'policy-change-open',
         component: () => import('@/pages/PolicyChangeOpen.vue'),
         meta: { title: 'policyChangeOpen', showSideNav: true },
+      },
+      {
+        path: 'policy-change/nat-open',
+        name: 'policy-change-nat-open',
+        component: () => import('@/pages/PolicyChangeNatOpen.vue'),
+        meta: { title: 'policyChangeNatOpen', showSideNav: true },
+      },
+      {
+        path: 'policy-change/open-detail',
+        name: 'policy-change-open-detail',
+        component: () => import('@/pages/PolicyChangeOpenDetail.vue'),
+        meta: { title: 'policyChangeOpenDetail', showSideNav: true },
       },
       {
         path: 'policy-change/modify',
